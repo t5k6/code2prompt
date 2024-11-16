@@ -78,9 +78,9 @@ pub fn traverse_directory(
 
                         if !code.trim().is_empty() && !code.contains(char::REPLACEMENT_CHARACTER) {
                             let file_path = if relative_paths {
-                                format!("{}/{}", parent_directory, relative_path.display())
+                                format!("{}/{}", parent_directory, relative_path.display()).replace('\\', "/")
                             } else {
-                                path.display().to_string()
+                                path.display().to_string().replace('\\', "/")
                             };
 
                             files.push(json!({

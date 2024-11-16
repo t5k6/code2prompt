@@ -79,9 +79,13 @@ struct Cli {
     #[clap(long)]
     no_codeblock: bool,
 
-    /// Use relative paths instead of absolute paths, including the parent directory
+    /// Use relative paths instead of absolute paths, including the parent directory. This is the default behaviour.
     #[clap(long)]
     relative_paths: bool,
+
+    /// Use absolute paths for files. This overrides the default relative path behavior.
+    #[clap(long)]
+    absolute_paths: bool,
 
     /// Optional Disable copying to clipboard
     #[clap(long)]
@@ -111,6 +115,9 @@ fn main() -> Result<()> {
     let include_patterns = parse_patterns(&args.include);
     let exclude_patterns = parse_patterns(&args.exclude);
 
+    // Determine path type based on CLI arguments
+    let relative_paths = !args.absolute_paths;
+
     // Traverse the directory
     let create_tree = traverse_directory(
         &args.path,
@@ -118,7 +125,7 @@ fn main() -> Result<()> {
         &exclude_patterns,
         args.include_priority,
         args.line_number,
-        args.relative_paths,
+        relative_paths,
         args.exclude_from_tree,
         args.no_codeblock,
     );
