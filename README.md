@@ -42,7 +42,7 @@ You can customize the prompt template to achieve any of the desired use cases. I
 
 ### Binary releases
 
-Download the latest binary for your OS from [Releases](https://github.com/mufeedvh/code2prompt/releases). 
+Download the latest binary for your OS from [Releases](https://github.com/mufeedvh/code2prompt/releases).
 
 ### Source build
 Requires:
@@ -56,7 +56,7 @@ cargo build --release
 ```
 
 ## cargo
-installs from the [`crates.io`](https://crates.io) registry. 
+installs from the [`crates.io`](https://crates.io) registry.
 
 ```sh
 cargo install code2prompt
@@ -76,7 +76,7 @@ paru/yay -S code2prompt
 ```
 
 ### Nix
-If you are on nix, You can use `nix-env` or `profile` to install. 
+If you are on nix, You can use `nix-env` or `profile` to install.
 
 ```sh
 # without flakes:
@@ -129,8 +129,8 @@ Specify a tokenizer for token count:
 code2prompt path/to/codebase --tokens --encoding=p50k
 ```
 
-Supported tokenizers: `cl100k`, `p50k`, `p50k_edit`, `r50k_bas`.
-> [!NOTE]  
+Supported tokenizers: `o200k_base`, `cl100k`, `p50k`, `p50k_edit`, `r50k_bas`.
+> [!NOTE]
 > See [Tokenizers](#tokenizers) for more details.
 
 Save the generated prompt to an output file:
@@ -149,10 +149,10 @@ The JSON output will have the following structure:
 
 ```json
 {
-  "prompt": "<Generated Prompt>", 
+  "prompt": "<Generated Prompt>",
   "directory_name": "codebase",
   "token_count": 1234,
-  "model_info": "ChatGPT models, text-embedding-ada-002",
+  "model_info": "Model info: GPT-4o models, o1 models",
   "files": []
 }
 ```
@@ -246,6 +246,7 @@ Tokenization is implemented using [`tiktoken-rs`](https://github.com/zurawiki/ti
 
 | Encoding name           | OpenAI models                                                             |
 | ----------------------- | ------------------------------------------------------------------------- |
+| `o200k_base`            | GPT-4o models, o1 models                                                  |
 | `cl100k_base`           | ChatGPT models, `text-embedding-ada-002`                                  |
 | `p50k_base`             | Code models, `text-davinci-002`, `text-davinci-003`                       |
 | `p50k_edit`             | Use for edit models like `text-davinci-edit-001`, `code-davinci-edit-001` |
@@ -262,7 +263,7 @@ For more context on the different tokenizers, see the [OpenAI Cookbook](https://
 Ways to contribute:
 
 - Suggest a feature
-- Report a bug  
+- Report a bug
 - Fix something and open a pull request
 - Help me document the code
 - Spread the word
