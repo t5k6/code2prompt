@@ -1,10 +1,10 @@
 //! This module contains the logic for filtering files based on include and exclude patterns.
 
+use std::fs;
+use std::path::Path;
 use colored::*;
 use glob::Pattern;
 use log::{debug, error};
-use std::fs;
-use std::path::Path;
 
 /// Determines whether a file should be included based on include and exclude patterns.
 ///
@@ -20,8 +20,8 @@ use std::path::Path;
 /// * `bool` - `true` if the file should be included, `false` otherwise.
 pub fn should_include_file(
     path: &Path,
-    include_patterns: &[String],
-    exclude_patterns: &[String],
+    include_patterns: &[Pattern],
+    exclude_patterns: &[Pattern],
     include_priority: bool,
 ) -> bool {
     // ~~~ Clean path ~~~
@@ -32,15 +32,15 @@ pub fn should_include_file(
             return false;
         }
     };
-    let path_str = canonical_path.to_str().unwrap();
+    let path_str = canonical_path.to_string_lossy();
 
     // ~~~ Check glob patterns ~~~
     let included = include_patterns
         .iter()
-        .any(|pattern| Pattern::new(pattern).unwrap().matches(path_str));
+        .any(|pattern| pattern.matches(&path_str));
     let excluded = exclude_patterns
         .iter()
-        .any(|pattern| Pattern::new(pattern).unwrap().matches(path_str));
+        .any(|pattern| pattern.matches(&path_str));
 
     // ~~~ Decision ~~~
     let result = match (included, excluded) {

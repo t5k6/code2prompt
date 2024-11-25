@@ -1,12 +1,13 @@
 //! This module contains the functions for traversing the directory and processing the files.
 
 use crate::filter::should_include_file;
-use anyhow::Result;
+use std::fs;
+use std::io::Error;
+use std::path::Path;
+use glob::Pattern;
 use ignore::WalkBuilder;
 use log::debug;
 use serde_json::json;
-use std::fs;
-use std::path::Path;
 use termtree::Tree;
 
 /// Traverses the directory and returns the string representation of the tree and the vector of JSON file representations.
@@ -26,14 +27,14 @@ use termtree::Tree;
 #[allow(clippy::too_many_arguments)]
 pub fn traverse_directory(
     root_path: &Path,
-    include: &[String],
-    exclude: &[String],
+    include: &[Pattern],
+    exclude: &[Pattern],
     include_priority: bool,
     line_number: bool,
     relative_paths: bool,
     exclude_from_tree: bool,
     no_codeblock: bool,
-) -> Result<(String, Vec<serde_json::Value>)> {
+) -> Result<(String, Vec<serde_json::Value>), Error> {
     // ~~~ Initialization ~~~
     let mut files = Vec::new();
     let canonical_root_path = root_path.canonicalize()?;

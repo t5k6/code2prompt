@@ -3,104 +3,122 @@
 //! Author: Mufeed VH (@mufeedvh)
 //! Contributor: Olivier D'Ancona (@ODAncona)
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
+use colored::*;
+use glob::Pattern;
+use indicatif::{ProgressBar, ProgressStyle};
+use inquire::MultiSelect;
+use log::{debug, error};
+use serde_json::json;
 use code2prompt::{
     copy_to_clipboard, get_git_diff, get_git_diff_between_branches, get_git_log, get_model_info,
     get_tokenizer, handle_undefined_variables, handlebars_setup, label, render_template,
     traverse_directory, write_to_file,
 };
-use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, error};
-use serde_json::json;
-use std::path::PathBuf;
 
 // Constants
 const DEFAULT_TEMPLATE_NAME: &str = "default";
 const CUSTOM_TEMPLATE_NAME: &str = "custom";
 
-// CLI Arguments
+// CLI
 #[derive(Parser)]
-#[clap(name = "code2prompt", version = "2.0.0", author = "Mufeed VH")]
-#[command(arg_required_else_help = true)]
+#[command(author = "Mufeed VH", version = "2.0.0", arg_required_else_help = true)]
 struct Cli {
     /// Path to the codebase directory
     #[arg()]
     path: PathBuf,
 
     /// Patterns to include
-    #[clap(long)]
+    #[arg(long)]
     include: Option<String>,
 
     /// Patterns to exclude
-    #[clap(long)]
+    #[arg(long)]
     exclude: Option<String>,
 
     /// Include files in case of conflict between include and exclude patterns
-    #[clap(long)]
+    #[arg(long)]
     include_priority: bool,
 
     /// Exclude files/folders from the source tree based on exclude patterns
-    #[clap(long)]
+    #[arg(long)]
     exclude_from_tree: bool,
 
     /// Display the token count of the generated prompt
-    #[clap(long)]
+    #[arg(long)]
     tokens: bool,
 
     /// Optional tokenizer to use for token count
-    ///
     /// Supported tokenizers: o200k_base (default), cl100k, p50k, p50k_edit, r50k, gpt2
-    #[clap(short = 'c', long)]
+    #[arg(short, long)]
     encoding: Option<String>,
 
     /// Optional output file path
-    #[clap(short, long)]
+    #[arg(short, long)]
     output: Option<String>,
 
     /// Include git diff
-    #[clap(short, long)]
+    #[arg(short, long)]
     diff: bool,
 
     /// Generate git diff between two branches
-    #[clap(long, value_name = "BRANCHES")]
+    #[arg(long, value_name = "BRANCHES")]
     git_diff_branch: Option<String>,
 
     /// Retrieve git log between two branches
-    #[clap(long, value_name = "BRANCHES")]
+    #[arg(long, value_name = "BRANCHES")]
     git_log_branch: Option<String>,
 
     /// Add line numbers to the source code
-    #[clap(short, long)]
+    #[arg(short, long)]
     line_number: bool,
 
     /// Disable wrapping code inside markdown code blocks
-    #[clap(long)]
+    #[arg(long)]
     no_codeblock: bool,
 
     /// Use relative paths instead of absolute paths, including the parent directory. This is the default behaviour.
-    #[clap(long)]
+    #[arg(long)]
     relative_paths: bool,
 
     /// Use absolute paths for files. This overrides the default relative path behavior.
-    #[clap(long)]
+    #[arg(long)]
     absolute_paths: bool,
 
     /// Optional Disable copying to clipboard
-    #[clap(long)]
+    #[arg(long)]
     no_clipboard: bool,
 
     /// Optional Path to a custom Handlebars template
-    #[clap(short, long)]
+    #[arg(short, long)]
     template: Option<PathBuf>,
 
     /// Print output as JSON
-    #[clap(long)]
+    #[arg(long)]
     json: bool,
 }
 
+fn print_kv(key: &str, value: &str) {
+    println!(
+        "{}: {}",
+        key.bold().white(),
+        value.bold().yellow()
+    );
+}
+
+fn print_summary(path: &str, _token_count: usize, files_processed: usize) {
+    print_kv("Directory Processed", path);
+    // print_kv("Token Count", &token_count.to_string());
+    // print_kv("Model Info", &model_info);
+    print_kv("Files Processed", &files_processed.to_string());
+    println!("{}", "=".repeat(40));
+}
+
 fn main() -> Result<()> {
+    println!("Processing the codebase...\n");
     env_logger::init();
     let args = Cli::parse();
 
@@ -109,17 +127,17 @@ fn main() -> Result<()> {
     let handlebars = handlebars_setup(&template_content, template_name)?;
 
     // Progress Bar Setup
-    let spinner = setup_spinner("Traversing directory and building tree...");
+    let spinner = setup_spinner("Step 1: Identifying file types and building tree...");
 
     // Parse Patterns
-    let include_patterns = parse_patterns(&args.include);
-    let exclude_patterns = parse_patterns(&args.exclude);
+    let include_patterns: Vec<Pattern> = parse_patterns(&args.include).iter().map(|p| Pattern::new(p).unwrap()).collect();
+    let exclude_patterns: Vec<Pattern> = parse_patterns(&args.exclude).iter().map(|p| Pattern::new(p).unwrap()).collect();
 
     // Determine path type based on CLI arguments
     let relative_paths = !args.absolute_paths;
 
-    // Traverse the directory
-    let create_tree = traverse_directory(
+    // Traverse the directory just to get the extensions
+    let (_tree, files) = traverse_directory(
         &args.path,
         &include_patterns,
         &exclude_patterns,
@@ -128,22 +146,44 @@ fn main() -> Result<()> {
         relative_paths,
         args.exclude_from_tree,
         args.no_codeblock,
-    );
+    )?;
 
-    let (tree, files) = match create_tree {
-        Ok(result) => result,
-        Err(e) => {
-            spinner.finish_with_message("Failed!".red().to_string());
-            eprintln!(
-                "{}{}{} {}",
-                "[".bold().white(),
-                "!".bold().red(),
-                "]".bold().white(),
-                format!("Failed to build directory tree: {}", e).red()
-            );
-            std::process::exit(1);
+    // Collect unique file extensions
+    let mut extensions: HashSet<String> = HashSet::new();
+    for file in &files {
+        if let Some(ext) = file["extension"].as_str() {
+            extensions.insert(ext.to_string());
         }
-    };
+    }
+    let extensions: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
+
+    // Prompt user to select file extensions
+    let selected_extensions = MultiSelect::new("\n🌟 Select file extensions to include:", extensions)
+        .with_formatter(&|options| {
+            options
+                .iter()
+                .map(|option| format!("📄 {}", option.value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .prompt()?;
+
+    // Filter files based on selected extensions
+    let included_extensions_patterns: Vec<String> = selected_extensions.iter().map(|ext| format!("*.{}", ext)).collect();
+    let all_include_patterns: Vec<Pattern> = [include_patterns, included_extensions_patterns.iter().map(|p| Pattern::new(p).unwrap()).collect()].concat();
+
+    let (tree, files) = traverse_directory(
+        &args.path,
+        &all_include_patterns,
+        &exclude_patterns,
+        args.include_priority,
+        args.line_number,
+        relative_paths,
+        args.exclude_from_tree,
+        args.no_codeblock,
+    )?;
+
+    spinner.finish_with_message("Done!".green().to_string());
 
     // Git Diff
     let git_diff = if args.diff {
@@ -153,32 +193,30 @@ fn main() -> Result<()> {
         String::new()
     };
 
-    // git diff two get_git_diff_between_branches
+    // Git diff between two branches
     let mut git_diff_branch: String = String::new();
     if let Some(branches) = &args.git_diff_branch {
         spinner.set_message("Generating git diff between two branches...");
-        let branches = parse_patterns(&Some(branches.to_string()));
+        let branches: Vec<String> = parse_patterns(&Some(branches.to_string()));
         if branches.len() != 2 {
             error!("Please provide exactly two branches separated by a comma.");
             std::process::exit(1);
         }
         git_diff_branch = get_git_diff_between_branches(&args.path, &branches[0], &branches[1])
-            .unwrap_or_default()
+            .unwrap_or_default();
     }
 
-    // git diff two get_git_diff_between_branches
+    // Git log between two branches
     let mut git_log_branch: String = String::new();
     if let Some(branches) = &args.git_log_branch {
         spinner.set_message("Generating git log between two branches...");
-        let branches = parse_patterns(&Some(branches.to_string()));
+        let branches: Vec<String> = parse_patterns(&Some(branches.to_string()));
         if branches.len() != 2 {
             error!("Please provide exactly two branches separated by a comma.");
             std::process::exit(1);
         }
-        git_log_branch = get_git_log(&args.path, &branches[0], &branches[1]).unwrap_or_default()
+        git_log_branch = get_git_log(&args.path, &branches[0], &branches[1]).unwrap_or_default();
     }
-
-    spinner.finish_with_message("Done!".green().to_string());
 
     // Prepare JSON Data
     let mut data = json!({
@@ -231,14 +269,14 @@ fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&json_output)?);
         return Ok(());
     } else if args.tokens {
-            println!(
-                "{}{}{} Token count: {}, Model info: {}",
-                "[".bold().white(),
-                "i".bold().blue(),
-                "]".bold().white(),
-                token_count.to_string().bold().yellow(),
-                model_info
-            );
+        println!(
+            "{}{}{} Token count: {}, Model info: {}",
+            "[".bold().white(),
+            "i".bold().blue(),
+            "]".bold().white(),
+            token_count.to_string().bold().yellow(),
+            model_info
+        );
     }
 
     // Copy to Clipboard
@@ -250,11 +288,11 @@ fn main() -> Result<()> {
                     "[".bold().white(),
                     "✓".bold().green(),
                     "]".bold().white(),
-                    "Copied to clipboard successfully.".green()
+                    "Copied to clipboard"
                 );
             }
             Err(e) => {
-                eprintln!(
+                println!(
                     "{}{}{} {}",
                     "[".bold().white(),
                     "!".bold().red(),
@@ -270,6 +308,8 @@ fn main() -> Result<()> {
     if let Some(output_path) = &args.output {
         write_to_file(output_path, &rendered)?;
     }
+
+    print_summary(&args.path.to_string_lossy(), token_count, files.len());
 
     Ok(())
 }
@@ -288,7 +328,7 @@ fn setup_spinner(message: &str) -> ProgressBar {
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));
     spinner.set_style(
         ProgressStyle::default_spinner()
-            .tick_strings(&["▹▹▹▹▹", "▸▹▹▹▹", "▹▸▹▹▹", "▹▹▸▹▹", "▹▹▹▸▹", "▹▹▹▹▸"])
+            .tick_strings(&["🌟", "🌀", "✨", "🌟", "💫", "🔄"])
             .template("{spinner:.blue} {msg}")
             .unwrap(),
     );

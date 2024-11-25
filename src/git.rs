@@ -1,9 +1,10 @@
 //! This module handles git operations.
 
+use std::path::Path;
 use anyhow::{Context, Result};
 use git2::{DiffOptions, Repository};
 use log::info;
-use std::path::Path;
+
 
 /// Generates a git diff for the repository at the provided path
 ///
