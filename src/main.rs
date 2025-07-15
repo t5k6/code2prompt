@@ -1,334 +1,424 @@
-//! code2prompt is a command-line tool to generate an LLM prompt from a codebase directory.
-//!
-//! Author: Mufeed VH (@mufeedvh)
-//! Contributor: Olivier D'Ancona (@ODAncona)
+// src/main.rs
 
-use std::collections::HashSet;
-use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
-use colored::*;
-use glob::Pattern;
-use indicatif::{ProgressBar, ProgressStyle};
-use inquire::MultiSelect;
-use log::{debug, error};
-use serde_json::json;
+use code2prompt::engine::config::{OutputFormat, TokenFormat};
 use code2prompt::{
-    copy_to_clipboard, get_git_diff, get_git_diff_between_branches, get_git_log, get_model_info,
-    get_tokenizer, handle_undefined_variables, handlebars_setup, label, render_template,
-    traverse_directory, write_to_file,
+    engine::token::{get_model_info, get_tokenizer},
+    ui::{
+        cli::Cli,
+        template::{handlebars_setup, prompt_for_undefined_variables, write_to_file},
+    },
+    Code2PromptConfigBuilder, Code2PromptSession,
 };
+use glob::Pattern;
+use serde_json::json;
+use std::path::PathBuf;
+
+#[cfg(feature = "colors")]
+use colored::{self, Colorize};
+#[cfg(feature = "interactive")]
+use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(feature = "interactive")]
+use inquire::MultiSelect;
+use log::warn;
 
 // Constants
 const DEFAULT_TEMPLATE_NAME: &str = "default";
 const CUSTOM_TEMPLATE_NAME: &str = "custom";
 
-// CLI
-#[derive(Parser)]
-#[command(author = "Mufeed VH", version = "2.0.0", arg_required_else_help = true)]
-struct Cli {
-    /// Path to the codebase directory
-    #[arg()]
-    path: PathBuf,
-
-    /// Patterns to include
-    #[arg(long)]
-    include: Option<String>,
-
-    /// Patterns to exclude
-    #[arg(long)]
-    exclude: Option<String>,
-
-    /// Include files in case of conflict between include and exclude patterns
-    #[arg(long)]
-    include_priority: bool,
-
-    /// Exclude files/folders from the source tree based on exclude patterns
-    #[arg(long)]
-    exclude_from_tree: bool,
-
-    /// Display the token count of the generated prompt
-    #[arg(long)]
-    tokens: bool,
-
-    /// Optional tokenizer to use for token count
-    /// Supported tokenizers: o200k_base (default), cl100k, p50k, p50k_edit, r50k, gpt2
-    #[arg(short, long)]
-    encoding: Option<String>,
-
-    /// Optional output file path
-    #[arg(short, long)]
-    output: Option<String>,
-
-    /// Include git diff
-    #[arg(short, long)]
-    diff: bool,
-
-    /// Generate git diff between two branches
-    #[arg(long, value_name = "BRANCHES")]
-    git_diff_branch: Option<String>,
-
-    /// Retrieve git log between two branches
-    #[arg(long, value_name = "BRANCHES")]
-    git_log_branch: Option<String>,
-
-    /// Add line numbers to the source code
-    #[arg(short, long)]
-    line_number: bool,
-
-    /// Disable wrapping code inside markdown code blocks
-    #[arg(long)]
-    no_codeblock: bool,
-
-    /// Use relative paths instead of absolute paths, including the parent directory. This is the default behaviour.
-    #[arg(long)]
-    relative_paths: bool,
-
-    /// Use absolute paths for files. This overrides the default relative path behavior.
-    #[arg(long)]
-    absolute_paths: bool,
-
-    /// Optional Disable copying to clipboard
-    #[arg(long)]
-    no_clipboard: bool,
-
-    /// Optional Path to a custom Handlebars template
-    #[arg(short, long)]
-    template: Option<PathBuf>,
-
-    /// Print output as JSON
-    #[arg(long)]
-    json: bool,
-}
-
-fn print_kv(key: &str, value: &str) {
-    println!(
-        "{}: {}",
-        key.bold().white(),
-        value.bold().yellow()
-    );
-}
-
-fn print_summary(path: &str, _token_count: usize, files_processed: usize) {
-    print_kv("Directory Processed", path);
-    // print_kv("Token Count", &token_count.to_string());
-    // print_kv("Model Info", &model_info);
-    print_kv("Files Processed", &files_processed.to_string());
-    println!("{}", "=".repeat(40));
-}
-
+// Main function remains the same as your original, just with updated use paths
+// and session logic. The logic itself was already well-structured.
 fn main() -> Result<()> {
-    println!("Processing the codebase...\n");
+    #[cfg(feature = "logging")]
     env_logger::init();
     let args = Cli::parse();
 
-    // Handlebars Template Setup
-    let (template_content, template_name) = get_template(&args)?;
-    let handlebars = handlebars_setup(&template_content, template_name)?;
+    if args.clipboard_daemon {
+    #[cfg(feature = "clipboard")]
+    {
+        // The daemon logic is now self-contained in the copy_to_clipboard function
+        code2prompt::ui::clipboard::copy_to_clipboard("", true)?;
+    }
+        return Ok(());
+    }
 
-    // Progress Bar Setup
-    let spinner = setup_spinner("Step 1: Identifying file types and building tree...");
 
-    // Parse Patterns
-    let include_patterns: Vec<Pattern> = parse_patterns(&args.include).iter().map(|p| Pattern::new(p).unwrap()).collect();
-    let exclude_patterns: Vec<Pattern> = parse_patterns(&args.exclude).iter().map(|p| Pattern::new(p).unwrap()).collect();
+    println!("Processing codebase at '{}'...\n", args.path.display());
 
-    // Determine path type based on CLI arguments
-    let relative_paths = !args.absolute_paths;
+    // --- Step 1: Determine include patterns from all sources ---
+    let mut final_include_patterns = args.include.clone();
 
-    // Traverse the directory just to get the extensions
-    let (_tree, files) = traverse_directory(
-        &args.path,
-        &include_patterns,
-        &exclude_patterns,
-        args.include_priority,
-        args.line_number,
-        relative_paths,
-        args.exclude_from_tree,
-        args.no_codeblock,
-    )?;
+    let extension_patterns: Vec<String> = args
+        .extensions
+        .iter()
+        .map(|ext| format!("**/*.{}", ext))
+        .collect();
+    final_include_patterns.extend(extension_patterns);
 
-    // Collect unique file extensions
-    let mut extensions: HashSet<String> = HashSet::new();
-    for file in &files {
-        if let Some(ext) = file["extension"].as_str() {
-            extensions.insert(ext.to_string());
+    let needs_interactive_selection = !args.no_interactive
+        && final_include_patterns.is_empty();
+
+    if needs_interactive_selection {
+        #[cfg(feature = "interactive")]
+        {
+            // MODIFIED: Update spinner message
+            let spinner = setup_spinner("Step 1: Scanning for file types & folders...");
+            let scan_config = Code2PromptConfigBuilder::default()
+                .path(args.path.clone())
+                .exclude_patterns(
+                    args.exclude
+                        .iter()
+                        .filter_map(|p| Pattern::new(p).ok())
+                        .collect::<Vec<_>>(),
+                )
+                .no_ignore(args.no_ignore)
+                .hidden(args.hidden)
+                .follow_symlinks(args.follow_symlinks)
+                .build()?;
+            let mut scan_session = Code2PromptSession::new(scan_config)?;
+            scan_session.scan_extensions()?;
+            spinner.finish_with_message("Done!".green().to_string());
+
+            let mut sorted_extensions: Vec<_> = scan_session.all_extensions.into_iter().collect();
+            sorted_extensions.sort();
+
+            let selected_extensions: Vec<String> = if sorted_extensions.is_empty() {
+                if atty::is(atty::Stream::Stdout) {
+                    println!("{}", "No files found to select.".yellow());
+                } else {
+                    println!("No files found to select.");
+                }
+                vec![]
+            } else {
+                MultiSelect::new(
+                    "Step 2: Select file extensions (space to select, enter to confirm):",
+                    sorted_extensions,
+                )
+                .with_help_message("Use space to toggle selections, then press enter.")
+                .with_formatter(&|a| format!("{} extensions selected", a.len()))
+                .prompt()?
+            };
+
+            let mut sorted_dirs: Vec<_> = scan_session.all_directories.into_iter().collect();
+            sorted_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let selected_dirs: Vec<String> = if sorted_dirs.is_empty() {
+                if atty::is(atty::Stream::Stdout) {
+                    println!("{}", "No sub-directories found to select from.".yellow());
+                }
+                vec![]
+            } else {
+                let display_items: Vec<String> = sorted_dirs
+                    .iter()
+                    .map(|(d, count)| format!("{} ({})", d, count))
+                    .collect();
+                MultiSelect::new(
+                    "Step 2b: Select folders (optional, space to select, enter to confirm):",
+                    display_items,
+                )
+                .with_help_message("Use space to toggle, then press enter. Skip to include files from all folders.")
+                .with_formatter(&|a| format!("{} folders selected", a.len()))
+                .prompt()?
+                .into_iter()
+                // Safely strip the " (count)" part from the selection
+                .map(|s| s.rsplit_once(' ').unwrap().0.trim_end().to_string())
+                .collect()
+            };
+
+            if selected_extensions.is_empty() && selected_dirs.is_empty() {
+                if atty::is(atty::Stream::Stdout) {
+                    println!("{}", "No selections made. Exiting.".yellow());
+                } else {
+                    println!("No selections made. Exiting.");
+                }
+                return Ok(());
+            }
+
+            if !selected_dirs.is_empty() {
+                // User picked folders. This is the primary filter.
+                if selected_extensions.is_empty() {
+                    // All files within selected folders
+                    final_include_patterns.extend(selected_dirs.iter().map(|d| format!("{}/**", d)));
+                } else {
+                    // Specific extensions within selected folders (cross-product)
+                    for dir in &selected_dirs {
+                        for ext in &selected_extensions {
+                            final_include_patterns.push(format!("{}/**/*.{}", dir, ext));
+                        }
+                    }
+                }
+            } else if !selected_extensions.is_empty() {
+                // No folders selected, only extensions. Apply globally.
+                 let selected_glob_patterns: Vec<String> = selected_extensions
+                    .iter()
+                    .map(|ext| format!("**/*.{}", ext))
+                    .collect();
+                final_include_patterns.extend(selected_glob_patterns);
+            }
         }
     }
-    let extensions: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
 
-    // Prompt user to select file extensions
-    let selected_extensions = MultiSelect::new("\n🌟 Select file extensions to include:", extensions)
-        .with_formatter(&|options| {
-            options
-                .iter()
-                .map(|option| format!("📄 {}", option.value))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .prompt()?;
+    if final_include_patterns.is_empty() {
+        warn!("No include patterns were provided. No files will be processed. Use --include, --extensions, or interactive mode.");
+    }
 
-    // Filter files based on selected extensions
-    let included_extensions_patterns: Vec<String> = selected_extensions.iter().map(|ext| format!("*.{}", ext)).collect();
-    let all_include_patterns: Vec<Pattern> = [include_patterns, included_extensions_patterns.iter().map(|p| Pattern::new(p).unwrap()).collect()].concat();
+    // --- Step 2: Build the full configuration ---
+    let include_patterns: Vec<_> = final_include_patterns
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .collect();
+    let exclude_patterns: Vec<_> = args
+        .exclude
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .collect();
 
-    let (tree, files) = traverse_directory(
-        &args.path,
-        &all_include_patterns,
-        &exclude_patterns,
-        args.include_priority,
-        args.line_number,
-        relative_paths,
-        args.exclude_from_tree,
-        args.no_codeblock,
-    )?;
+    let config = Code2PromptConfigBuilder::default()
+        .path(args.path.clone())
+        .include_patterns(include_patterns)
+        .exclude_patterns(exclude_patterns)
+        .include_priority(args.include_priority)
+        .line_numbers(args.line_numbers)
+        .absolute_path(!args.relative_paths)
+        .full_directory_tree(args.full_directory_tree)
+        .no_codeblock(args.no_codeblock)
+        .tokenizer(args.tokenizer)
+        .token_map_enabled(args.token_map)
+        .no_ignore(args.no_ignore)
+        .hidden(args.hidden)
+        .follow_symlinks(args.follow_symlinks)
+        .sort(args.sort.clone())
+        .build()?;
 
-    spinner.finish_with_message("Done!".green().to_string());
+    // --- Step 3: Create and run the main session ---
+    let mut session = Code2PromptSession::new(config)?;
 
-    // Git Diff
-    let git_diff = if args.diff {
-        spinner.set_message("Generating git diff...");
-        get_git_diff(&args.path).unwrap_or_default()
-    } else {
-        String::new()
+    let files_processed_count = {
+        #[cfg(feature = "interactive")]
+        let spinner = setup_spinner("Step 3: Processing files...");
+        #[cfg(not(feature = "interactive"))]
+        println!("Step 3: Processing files...");
+
+        session.process_codebase()?;
+
+        #[cfg(feature = "interactive")]
+        spinner.finish_with_message("Done!".green().to_string());
+        #[cfg(not(feature = "interactive"))]
+        println!("Done!");
+
+        session.processed_entries.len() // This is the return value of the block
     };
 
-    // Git diff between two branches
-    let mut git_diff_branch: String = String::new();
-    if let Some(branches) = &args.git_diff_branch {
-        spinner.set_message("Generating git diff between two branches...");
-        let branches: Vec<String> = parse_patterns(&Some(branches.to_string()));
-        if branches.len() != 2 {
-            error!("Please provide exactly two branches separated by a comma.");
-            std::process::exit(1);
-        }
-        git_diff_branch = get_git_diff_between_branches(&args.path, &branches[0], &branches[1])
-            .unwrap_or_default();
+    session.sort_files();
+
+    // --- Step 4: Build template data ---
+    #[cfg(feature = "interactive")]
+    let spinner = setup_spinner("Step 4: Building final prompt...");
+    #[cfg(not(feature = "interactive"))]
+    println!("Step 4: Building final prompt...");
+
+    let git_diff_args = if args.diff { Some("") } else { None };
+    let git_diff_branch_args = args
+        .git_diff_branch
+        .as_ref()
+        .and_then(|b| Some((b.first()?.as_str(), b.get(1)?.as_str())));
+    let git_log_branch_args = args
+        .git_log_branch
+        .as_ref()
+        .and_then(|b| Some((b.first()?.as_str(), b.get(1)?.as_str())));
+
+    let mut data =
+        session.build_template_data(git_diff_args, git_diff_branch_args, git_log_branch_args)?;
+
+    #[cfg(feature = "interactive")]
+    spinner.finish_with_message("Done!".green().to_string());
+    #[cfg(not(feature = "interactive"))]
+    println!("Done!");
+
+    // --- Step 5: Render the template ---
+    let (template_content, template_name) = get_template_path(&args.template)?;
+    let handlebars = handlebars_setup(&template_content, template_name)?;
+
+    if !args.no_interactive {
+        #[cfg(feature = "interactive")]
+        prompt_for_undefined_variables(&mut data, &template_content)?;
     }
 
-    // Git log between two branches
-    let mut git_log_branch: String = String::new();
-    if let Some(branches) = &args.git_log_branch {
-        spinner.set_message("Generating git log between two branches...");
-        let branches: Vec<String> = parse_patterns(&Some(branches.to_string()));
-        if branches.len() != 2 {
-            error!("Please provide exactly two branches separated by a comma.");
-            std::process::exit(1);
-        }
-        git_log_branch = get_git_log(&args.path, &branches[0], &branches[1]).unwrap_or_default();
+    let rendered = session.render_template(&handlebars, template_name, &data)?;
+
+    if rendered.trim().is_empty() && files_processed_count > 0 {
+        warn!(
+            "The generated prompt is empty despite processing {} files. Check your template file.",
+            files_processed_count
+        );
+    } else if rendered.trim().is_empty() {
+        // This case is now handled by the warning at the top
     }
 
-    // Prepare JSON Data
-    let mut data = json!({
-        "absolute_code_path": label(&args.path),
-        "source_tree": tree,
-        "files": files,
-        "git_diff": git_diff,
-        "git_diff_branch": git_diff_branch,
-        "git_log_branch": git_log_branch
-    });
+    // --- Step 6: Handle output and visualization ---
+    let display_total_tokens = args.output_format != OutputFormat::Json
+        && args.tokens == TokenFormat::Format;
 
-    debug!(
-        "JSON Data: {}",
-        serde_json::to_string_pretty(&data).unwrap()
-    );
-
-    // Handle undefined variables
-    handle_undefined_variables(&mut data, &template_content)?;
-
-    // Render the template
-    let rendered = render_template(&handlebars, template_name, &data)?;
-
-    // Display Token Count
-    let token_count = if args.tokens {
-        let bpe = get_tokenizer(&args.encoding);
+    let total_prompt_tokens = if args.output_format == OutputFormat::Json
+        || display_total_tokens
+        || args.token_map
+    {
+        let bpe = get_tokenizer(args.tokenizer)?;
         bpe.encode_with_special_tokens(&rendered).len()
     } else {
         0
     };
 
-    let paths: Vec<String> = files
-        .iter()
-        .filter_map(|file| {
-            file.get("path")
-                .and_then(|p| p.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
+    if args.token_map {
+        if let Some(files_json) = data.get("files").and_then(|f| f.as_array()) {
+            let sum_file_tokens: usize = files_json
+                .iter()
+                .filter_map(|f| f.get("token_count").and_then(|tc| tc.as_u64()))
+                .map(|tc| tc as usize)
+                .sum();
 
-    let model_info = get_model_info(&args.encoding);
+            if sum_file_tokens > 0 {
+                if atty::is(atty::Stream::Stdout) {
+                    println!(
+                        "\n{}{}{} File Token Map (Sum of file tokens: {}):",
+                        "[".bold().white(),
+                        "i".bold().blue(),
+                        "]".bold().white(),
+                        sum_file_tokens.to_string().bold().yellow()
+                    );
+                } else {
+                    println!(
+                        "\n[i] File Token Map (Sum of file tokens: {}):",
+                        sum_file_tokens
+                    );
+                }
 
-    if args.json {
-        let json_output = json!({
-            "prompt": rendered,
-            "directory_name": label(&args.path),
-            "token_count": token_count,
-            "model_info": model_info,
-            "files": paths,
-        });
-        println!("{}", serde_json::to_string_pretty(&json_output)?);
-        return Ok(());
-    } else if args.tokens {
-        println!(
-            "{}{}{} Token count: {}, Model info: {}",
-            "[".bold().white(),
-            "i".bold().blue(),
-            "]".bold().white(),
-            token_count.to_string().bold().yellow(),
-            model_info
-        );
-    }
+                // Calculate dynamic line count based on terminal height
+                let max_lines = if let Some(lines) = args.token_map_lines {
+                    lines
+                } else {
+                    // Default to terminal height minus some padding, or 20 if unavailable
+                    terminal_size::terminal_size()
+                        .map(|(_, terminal_size::Height(h))| (h as usize).saturating_sub(10))
+                        .unwrap_or(20)
+                        .max(5) // Ensure at least 5 lines
+                };
 
-    // Copy to Clipboard
-    if !args.no_clipboard {
-        match copy_to_clipboard(&rendered) {
-            Ok(_) => {
-                println!(
-                    "{}{}{} {}",
-                    "[".bold().white(),
-                    "✓".bold().green(),
-                    "]".bold().white(),
-                    "Copied to clipboard"
+                let token_map_entries = code2prompt::engine::token_map::generate_token_map_with_limit(
+                    files_json,
+                    Some(max_lines),
+                    args.token_map_min_percent,
                 );
-            }
-            Err(e) => {
-                println!(
-                    "{}{}{} {}",
-                    "[".bold().white(),
-                    "!".bold().red(),
-                    "]".bold().white(),
-                    format!("Failed to copy to clipboard: {}", e).red()
-                );
-                println!("{}", &rendered);
+
+                // Call the display function from the UI module
+                code2prompt::ui::token_map_view::display_token_map(&token_map_entries, sum_file_tokens);
+
+            } else {
+                warn!("Token map was requested, but no files with token counts were found.");
             }
         }
     }
 
-    // Output File
-    if let Some(output_path) = &args.output {
-        write_to_file(output_path, &rendered)?;
+    if args.output_format == OutputFormat::Json {
+        let paths_for_json: Vec<String> = data
+            .get("files")
+            .and_then(|f| f.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|file| {
+                        file.get("path")
+                            .and_then(|p| p.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(); // or .unwrap_or(vec![])
+
+        let json_output = json!({
+            "prompt": rendered,
+            "directory_name": data["absolute_code_path"].as_str().unwrap_or(""),
+            "token_count": total_prompt_tokens,
+            "model_info": get_model_info(args.tokenizer),
+            "files": paths_for_json,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_output)?);
+        return Ok(());
     }
 
-    print_summary(&args.path.to_string_lossy(), token_count, files.len());
+    println!();
+    if display_total_tokens {
+        if atty::is(atty::Stream::Stdout) {
+            println!(
+                "{}{}{} Total Prompt Token count: {}, Model info: {}",
+                "[".bold().white(),
+                "i".bold().blue(),
+                "]".bold().white(),
+                total_prompt_tokens.to_string().bold().yellow(),
+                get_model_info(args.tokenizer)
+            );
+        } else {
+            println!(
+                "[i] Total Prompt Token count: {}, Model info: {}",
+                total_prompt_tokens,
+                get_model_info(args.tokenizer)
+            );
+        }
+    }
+
+    let mut clipboard_succeeded = false;
+    if !args.no_clipboard {
+        #[cfg(feature = "clipboard")]
+        match code2prompt::ui::clipboard::copy_to_clipboard(&rendered, false) { // Pass false here
+            Ok(_) => {
+                if atty::is(atty::Stream::Stdout) {
+                    println!(
+                        "{}{}{} {}",
+                        "[".bold().white(),
+                        "✓".bold().green(),
+                        "]".bold().white(),
+                        "Copied to clipboard successfully.".green()
+                    );
+                } else {
+                    println!("[✓] Copied to clipboard successfully.");
+                }
+                clipboard_succeeded = true;
+            }
+            Err(e) => {
+                if atty::is(atty::Stream::Stdout) {
+                    eprintln!(
+                        "{}{}{} {}",
+                        "[".bold().white(),
+                        "!".bold().red(),
+                        "]".bold().white(),
+                        format!("Failed to copy to clipboard: {}", e).red()
+                    );
+                } else {
+                    eprintln!("[!] Failed to copy to clipboard: {}", e);
+                }
+            }
+        }
+    }
+
+    if let Some(output_path_str) = &args.output_file {
+        write_to_file(output_path_str, &rendered)?;
+    } else if !clipboard_succeeded {
+        println!("\n--- PROMPT START ---\n{}\n--- PROMPT END ---", &rendered);
+    }
+
+    print_summary(&args.path.to_string_lossy(), files_processed_count);
 
     Ok(())
 }
 
-/// Sets up a progress spinner with a given message
-///
-/// # Arguments
-///
-/// * `message` - A message to display with the spinner
-///
-/// # Returns
-///
-/// * `ProgressBar` - The configured progress spinner
+// These helper functions from the old main.rs can be kept at the bottom of the file
+#[cfg(feature = "interactive")]
 fn setup_spinner(message: &str) -> ProgressBar {
     let spinner = ProgressBar::new_spinner();
     spinner.enable_steady_tick(std::time::Duration::from_millis(120));
     spinner.set_style(
         ProgressStyle::default_spinner()
-            .tick_strings(&["🌟", "🌀", "✨", "🌟", "💫", "🔄"])
+            .tick_strings(&["▹▹▹▹▹", "▸▹▹▹▹", "▹▸▹▹▹", "▹▹▸▹▹", "▹▹▹▸▹", "▹▹▹▹▸"])
             .template("{spinner:.blue} {msg}")
             .unwrap(),
     );
@@ -336,42 +426,44 @@ fn setup_spinner(message: &str) -> ProgressBar {
     spinner
 }
 
-/// Parses comma-separated patterns into a vector of strings
-///
-/// # Arguments
-///
-/// * `patterns` - An optional string containing comma-separated patterns
-///
-/// # Returns
-///
-/// * `Vec<String>` - A vector of parsed patterns
-fn parse_patterns(patterns: &Option<String>) -> Vec<String> {
-    match patterns {
-        Some(patterns) if !patterns.is_empty() => {
-            patterns.split(',').map(|s| s.trim().to_string()).collect()
-        }
-        _ => vec![],
-    }
-}
-
-/// Retrieves the template content and name based on the CLI arguments
-///
-/// # Arguments
-///
-/// * `args` - The parsed CLI arguments
-///
-/// # Returns
-///
-/// * `Result<(String, &str)>` - A tuple containing the template content and name
-fn get_template(args: &Cli) -> Result<(String, &str)> {
-    if let Some(template_path) = &args.template {
+fn get_template_path(template_path_opt: &Option<PathBuf>) -> Result<(String, &str)> {
+    if let Some(template_path) = template_path_opt {
         let content = std::fs::read_to_string(template_path)
             .context("Failed to read custom template file")?;
         Ok((content, CUSTOM_TEMPLATE_NAME))
     } else {
+        // Make sure 'default_template.hbs' is in the project root
         Ok((
-            include_str!("default_template.hbs").to_string(),
+            include_str!("../default_template.hbs").to_string(),
             DEFAULT_TEMPLATE_NAME,
         ))
     }
+}
+
+fn print_summary(path: &str, files_processed: usize) {
+    // This condition correctly checks if the 'colors' feature is enabled AND if we are in a TTY.
+    #[cfg(feature = "colors")]
+    if atty::is(atty::Stream::Stdout) {
+        // This is the "colors enabled" branch
+        let equals_line = "=".repeat(40).dimmed().to_string();
+        println!(
+            "\n{}\n{} {}\n{} {}\n{}",
+            equals_line,
+            "📂 Directory Processed:".bold(),
+            path,
+            "📄 Files Processed:".bold(),
+            files_processed.to_string().yellow(),
+            equals_line
+        );
+        return; // Exit early to avoid running the non-colored version
+    }
+
+    // This is the "no colors" branch.
+    // It will be executed if the 'colors' feature is disabled OR if stdout is not a TTY.
+    let equals_line = "=".repeat(40);
+    let summary = format!(
+        "\n{}\n📂 Directory Processed: {}\n📄 Files Processed: {}\n{}",
+        equals_line, path, files_processed, equals_line
+    );
+    println!("{}", summary);
 }

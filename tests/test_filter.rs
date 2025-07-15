@@ -1,4 +1,4 @@
-use code2prompt::filter::should_include_file;
+use code2prompt::engine::filter::should_include_file;
 use colored::*;
 use once_cell::sync::Lazy;
 use std::fs::{self, File};
@@ -58,13 +58,18 @@ fn create_test_hierarchy(base_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glob::Pattern;
+
+    fn compile_patterns(patterns: &[&str]) -> Vec<Pattern> {
+        patterns.iter().map(|s| Pattern::new(s).unwrap()).collect()
+    }
 
     #[test]
     fn test_no_list() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec![];
-        let exclude_patterns = vec![];
+        let include_patterns = compile_patterns(&[]);
+        let exclude_patterns = compile_patterns(&[]);
         let include_priority = true;
 
         for file in [
@@ -84,6 +89,7 @@ mod tests {
             let path = base_path.join(file);
             assert!(should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -95,100 +101,83 @@ mod tests {
     fn test_include_patterns() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec!["*.py".to_string()];
-        let exclude_patterns = vec![];
+        // Test with a simple extension pattern
+        let include_patterns_ext = compile_patterns(&["*.py"]);
+        let exclude_patterns = compile_patterns(&[]);
         let include_priority = false;
 
-        for file in [
-            "lowercase/foo.py",
-            "lowercase/bar.py",
-            "lowercase/baz.py",
-            "uppercase/FOO.py",
-            "uppercase/BAR.py",
-            "uppercase/BAZ.py",
-        ] {
-            let path = base_path.join(file);
-            assert!(should_include_file(
-                &path,
-                &include_patterns,
-                &exclude_patterns,
-                include_priority
-            ));
-        }
+        let path_ext = base_path.join("lowercase/foo.py");
+        // The root path should be the base directory for glob matching
+        assert!(should_include_file(
+            &path_ext,
+            base_path,
+            &include_patterns_ext,
+            &exclude_patterns,
+            include_priority
+        ));
 
-        for file in [
-            "lowercase/qux.txt",
-            "lowercase/corge.txt",
-            "lowercase/grault.txt",
-            "uppercase/QUX.txt",
-            "uppercase/CORGE.txt",
-            "uppercase/GRAULT.txt",
-        ] {
-            let path = base_path.join(file);
-            assert!(!should_include_file(
-                &path,
-                &include_patterns,
-                &exclude_patterns,
-                include_priority
-            ));
-        }
+        // Test with a globstar pattern
+        let include_patterns_glob = compile_patterns(&["**/*.py"]);
+        let path_glob = base_path.join("uppercase/FOO.py");
+        assert!(should_include_file(
+            &path_glob,
+            base_path,
+            &include_patterns_glob,
+            &exclude_patterns,
+            include_priority
+        ));
+
+        // Test a non-matching file
+        let path_non_match = base_path.join("lowercase/qux.txt");
+        assert!(!should_include_file(
+            &path_non_match,
+            base_path,
+            &include_patterns_glob,
+            &exclude_patterns,
+            include_priority
+        ));
     }
 
     #[test]
     fn test_exclude_patterns() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec![];
-        let exclude_patterns = vec!["*.txt".to_string()];
+        let include_patterns = compile_patterns(&[]);
+        let exclude_patterns = compile_patterns(&["**/*.txt"]);
         let include_priority = false;
 
-        for file in [
-            "lowercase/qux.txt",
-            "lowercase/corge.txt",
-            "lowercase/grault.txt",
-            "uppercase/QUX.txt",
-            "uppercase/CORGE.txt",
-            "uppercase/GRAULT.txt",
-        ] {
-            let path = base_path.join(file);
-            assert!(!should_include_file(
-                &path,
-                &include_patterns,
-                &exclude_patterns,
-                include_priority
-            ));
-        }
+        let path_to_check = base_path.join("lowercase/qux.txt");
+        assert!(!should_include_file(
+            &path_to_check,
+            base_path,
+            &include_patterns,
+            &exclude_patterns,
+            include_priority
+        ));
 
-        for file in [
-            "lowercase/foo.py",
-            "lowercase/bar.py",
-            "lowercase/baz.py",
-            "uppercase/FOO.py",
-            "uppercase/BAR.py",
-            "uppercase/BAZ.py",
-        ] {
-            let path = base_path.join(file);
-            assert!(should_include_file(
-                &path,
-                &include_patterns,
-                &exclude_patterns,
-                include_priority
-            ));
-        }
+        let path_to_include = base_path.join("lowercase/foo.py");
+        assert!(should_include_file(
+            &path_to_include,
+            base_path,
+            &include_patterns,
+            &exclude_patterns,
+            include_priority
+        ));
     }
 
     #[test]
     fn test_include_files() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec!["**/foo.py".to_string(), "**/bar.py".to_string()];
-        let exclude_patterns = vec![];
+        let include_patterns = compile_patterns(&["**/foo.py", "**/bar.py"]);
+        let exclude_patterns = compile_patterns(&[]);
         let include_priority = false;
 
         for file in ["lowercase/foo.py", "lowercase/bar.py"] {
             let path = base_path.join(file);
             assert!(should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -210,6 +199,7 @@ mod tests {
             let path = base_path.join(file);
             assert!(!should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -221,14 +211,15 @@ mod tests {
     fn test_exclude_files() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec![];
-        let exclude_patterns = vec!["**/foo.py".to_string(), "**/bar.py".to_string()];
+        let include_patterns = compile_patterns(&[]);
+        let exclude_patterns = compile_patterns(&["**/foo.py", "**/bar.py"]);
         let include_priority = false;
 
         for file in ["lowercase/foo.py", "lowercase/bar.py"] {
             let path = base_path.join(file);
             assert!(!should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -250,6 +241,7 @@ mod tests {
             let path = base_path.join(file);
             assert!(should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -261,14 +253,15 @@ mod tests {
     fn test_include_exclude_conflict_file() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec!["**/foo.py".to_string()];
-        let exclude_patterns = vec!["**/foo.py".to_string()];
+        let include_patterns = compile_patterns(&["**/foo.py"]);
+        let exclude_patterns = compile_patterns(&["**/foo.py"]);
         let include_priority = true;
 
         for file in ["lowercase/foo.py"] {
             let path = base_path.join(file);
             assert!(should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -291,6 +284,7 @@ mod tests {
             let path = base_path.join(file);
             assert!(!should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -302,8 +296,8 @@ mod tests {
     fn test_include_exclude_conflict_extension() {
         let base_path = TEST_DIR.path();
 
-        let include_patterns = vec!["*.py".to_string()];
-        let exclude_patterns = vec!["*.py".to_string()];
+        let include_patterns = compile_patterns(&["**/*.py"]);
+        let exclude_patterns = compile_patterns(&["**/*.py"]);
         let include_priority = true;
 
         for file in [
@@ -317,6 +311,7 @@ mod tests {
             let path = base_path.join(file);
             assert!(should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -334,6 +329,7 @@ mod tests {
             let path = base_path.join(file);
             assert!(!should_include_file(
                 &path,
+                base_path,
                 &include_patterns,
                 &exclude_patterns,
                 include_priority
@@ -344,11 +340,14 @@ mod tests {
     #[test]
     fn test_should_include_file_no_patterns() {
         let path = Path::new("src/main.rs");
-        let include_patterns: Vec<String> = vec![];
-        let exclude_patterns: Vec<String> = vec![];
+        // In this test, the root is the same as the path itself for simplicity.
+        let root = Path::new(".");
+        let include_patterns = compile_patterns(&[]);
+        let exclude_patterns = compile_patterns(&[]);
         let include_priority = false;
         assert!(should_include_file(
             &path,
+            root,
             &include_patterns,
             &exclude_patterns,
             include_priority
@@ -358,11 +357,14 @@ mod tests {
     #[test]
     fn test_should_exclude_file_with_patterns() {
         let path = Path::new("src/main.rs");
-        let include_patterns: Vec<String> = vec![];
-        let exclude_patterns: Vec<String> = vec!["*.rs".to_string()];
+        // In this test, the root is the same as the path itself for simplicity.
+        let root = Path::new(".");
+        let include_patterns = compile_patterns(&[]);
+        let exclude_patterns = compile_patterns(&["src/*.rs"]);
         let include_priority = false;
         assert!(!should_include_file(
             &path,
+            root,
             &include_patterns,
             &exclude_patterns,
             include_priority

@@ -1,13 +1,14 @@
-pub mod filter;
-pub mod git;
-pub mod path;
-pub mod template;
-pub mod token;
+// src/lib.rs
 
-pub use filter::should_include_file;
-pub use git::{get_git_diff, get_git_diff_between_branches, get_git_log};
-pub use path::{label, traverse_directory};
-pub use template::{
-    copy_to_clipboard, handle_undefined_variables, handlebars_setup, render_template, write_to_file,
+//! Internal library for code2prompt – not published on crates.io
+
+pub mod engine;
+pub mod ui;
+
+// Re-export a narrow, testable API surface
+pub use engine::{
+    config::{Code2PromptConfig, Code2PromptConfigBuilder},
+    model::{ProcessedEntry, TokenMapEntry},
+    session::Code2PromptSession,
+    token::{count_tokens, TokenizerChoice},
 };
-pub use token::{count_tokens, get_model_info, get_tokenizer};

@@ -1,10 +1,9 @@
-//! This module handles git operations.
+#![cfg(feature = "git")]
 
-use std::path::Path;
 use anyhow::{Context, Result};
-use git2::{DiffOptions, Repository};
+use git2::{Diff, DiffFormat, DiffOptions, Repository};
 use log::info;
-
+use std::path::Path;
 
 /// Generates a git diff for the repository at the provided path
 ///
@@ -18,26 +17,49 @@ use log::info;
 pub fn get_git_diff(repo_path: &Path) -> Result<String> {
     info!("Opening repository at path: {:?}", repo_path);
     let repo = Repository::open(repo_path).context("Failed to open repository")?;
-    let head = repo.head().context("Failed to get repository head")?;
-    let head_tree = head.peel_to_tree().context("Failed to peel to tree")?;
+    let mut opts = DiffOptions::new();
+    opts.ignore_whitespace(true)
+        .show_binary(false)
+        .context_lines(3);
 
-    let diff = repo
-        .diff_tree_to_index(
-            Some(&head_tree),
-            None,
-            Some(DiffOptions::new().ignore_whitespace(true)),
-        )
-        .context("Failed to generate diff")?;
+    // 1. Diff for staged changes (HEAD vs. Index)
+    let head_tree = repo
+        .head()
+        .ok()
+        .and_then(|h| h.peel_to_tree().ok());
+    let index = repo.index()?;
+    let staged_diff = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))?;
 
-    let mut diff_text = Vec::new();
-    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-        diff_text.extend_from_slice(line.content());
-        true
-    })
-    .context("Failed to print diff")?;
+    // 2. Diff for unstaged changes (Index vs. Working Directory)
+    let unstaged_diff = repo.diff_index_to_workdir(Some(&index), Some(&mut opts))?;
+
+    let mut diff_text = String::new();
+
+    // Helper to format and append a diff section
+    let mut append_diff = |diff: &Diff, header: &str| -> Result<()> {
+        let mut patch_text = Vec::new();
+        diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+            patch_text.extend_from_slice(line.content());
+            true
+        })?;
+
+        if !patch_text.is_empty() {
+            if !diff_text.is_empty() {
+                diff_text.push('\n');
+            }
+            diff_text.push_str("--- ");
+            diff_text.push_str(header);
+            diff_text.push_str(" ---\n");
+            diff_text.push_str(&String::from_utf8_lossy(&patch_text));
+        }
+        Ok(())
+    };
+
+    append_diff(&staged_diff, "Staged Changes")?;
+    append_diff(&unstaged_diff, "Unstaged Changes")?;
 
     info!("Generated git diff successfully");
-    Ok(String::from_utf8_lossy(&diff_text).into_owned())
+    Ok(diff_text)
 }
 
 /// Generates a git diff between two branches for the repository at the provided path
