@@ -1,9 +1,10 @@
 #![cfg(feature = "git")]
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use git2::{Diff, DiffFormat, DiffOptions, Repository};
 use log::info;
-use std::path::Path;
 
 /// Generates a git diff for the repository at the provided path
 ///
@@ -15,7 +16,7 @@ use std::path::Path;
 ///
 /// * `Result<String, git2::Error>` - The generated git diff as a string or an error
 pub fn get_git_diff(repo_path: &Path) -> Result<String> {
-    info!("Opening repository at path: {:?}", repo_path);
+    info!("Opening repository at path: {repo_path:?}");
     let repo = Repository::open(repo_path).context("Failed to open repository")?;
     let mut opts = DiffOptions::new();
     opts.ignore_whitespace(true)
@@ -23,12 +24,17 @@ pub fn get_git_diff(repo_path: &Path) -> Result<String> {
         .context_lines(3);
 
     // 1. Diff for staged changes (HEAD vs. Index)
-    let head_tree = repo
+    // Find the tree of the HEAD commit. If there's no HEAD, use an empty tree.
+    let head_tree_obj = repo
         .head()
         .ok()
-        .and_then(|h| h.peel_to_tree().ok());
-    let index = repo.index()?;
-    let staged_diff = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))?;
+        .and_then(|h| h.resolve().ok())
+        .and_then(|r| r.peel_to_tree().ok());
+
+    let mut index = repo.index()?;
+
+    let staged_diff =
+        repo.diff_tree_to_index(head_tree_obj.as_ref(), Some(&index), Some(&mut opts))?;
 
     // 2. Diff for unstaged changes (Index vs. Working Directory)
     let unstaged_diff = repo.diff_index_to_workdir(Some(&index), Some(&mut opts))?;
@@ -37,8 +43,9 @@ pub fn get_git_diff(repo_path: &Path) -> Result<String> {
 
     // Helper to format and append a diff section
     let mut append_diff = |diff: &Diff, header: &str| -> Result<()> {
-        let mut patch_text = Vec::new();
+        let mut patch_text: Vec<u8> = Vec::new();
         diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+            patch_text.push(line.origin() as u8);
             patch_text.extend_from_slice(line.content());
             true
         })?;
@@ -78,14 +85,7 @@ pub fn get_git_diff_between_branches(
     branch1: &str,
     branch2: &str,
 ) -> Result<String> {
-    info!("Opening repository at path: {:?}", repo_path);
-    let repo = Repository::open(repo_path).context("Failed to open repository")?;
-
-    for branch in [branch1, branch2].iter() {
-        if !branch_exists(&repo, branch) {
-            return Err(anyhow::anyhow!("Branch {} doesn't exist!", branch));
-        }
-    }
+    let (repo, branch1, branch2) = open_repo_and_validate_branches(repo_path, branch1, branch2)?;
 
     let branch1_commit = repo.revparse_single(branch1)?.peel_to_commit()?;
     let branch2_commit = repo.revparse_single(branch2)?.peel_to_commit()?;
@@ -101,8 +101,9 @@ pub fn get_git_diff_between_branches(
         )
         .context("Failed to generate diff between branches")?;
 
-    let mut diff_text = Vec::new();
+    let mut diff_text: Vec<u8> = Vec::new();
     diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        diff_text.push(line.origin() as u8);
         diff_text.extend_from_slice(line.content());
         true
     })
@@ -124,14 +125,7 @@ pub fn get_git_diff_between_branches(
 ///
 /// * `Result<String, git2::Error>` - The git log as a string or an error
 pub fn get_git_log(repo_path: &Path, branch1: &str, branch2: &str) -> Result<String> {
-    info!("Opening repository at path: {:?}", repo_path);
-    let repo = Repository::open(repo_path).context("Failed to open repository")?;
-
-    for branch in [branch1, branch2].iter() {
-        if !branch_exists(&repo, branch) {
-            return Err(anyhow::anyhow!("Branch {} doesn't exist!", branch));
-        }
-    }
+    let (repo, branch1, branch2) = open_repo_and_validate_branches(repo_path, branch1, branch2)?;
 
     let branch1_commit = repo.revparse_single(branch1)?.peel_to_commit()?;
     let branch2_commit = repo.revparse_single(branch2)?.peel_to_commit()?;
@@ -173,4 +167,21 @@ pub fn get_git_log(repo_path: &Path, branch1: &str, branch2: &str) -> Result<Str
 fn branch_exists(repo: &Repository, branch_name: &str) -> bool {
     repo.find_branch(branch_name, git2::BranchType::Local)
         .is_ok()
+}
+
+/// Opens a repository and validates that the given branches exist.
+fn open_repo_and_validate_branches<'a>(
+    repo_path: &Path,
+    branch1: &'a str,
+    branch2: &'a str,
+) -> Result<(Repository, &'a str, &'a str)> {
+    info!("Opening repository at path: {repo_path:?}");
+    let repo = Repository::open(repo_path).context("Failed to open repository")?;
+
+    for branch in [branch1, branch2].iter() {
+        if !branch_exists(&repo, branch) {
+            return Err(anyhow::anyhow!("Branch {} doesn't exist!", branch));
+        }
+    }
+    Ok((repo, branch1, branch2))
 }

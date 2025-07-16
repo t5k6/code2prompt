@@ -1,334 +1,315 @@
-//! This module contains the functions for traversing the directory and processing the files.
+use std::{cell::RefCell, fs, path::Path, sync::Arc, time::SystemTime};
 
-use crate::engine::config::Code2PromptConfig;
-use crate::engine::filter::should_include_file;
-use crate::engine::model::ProcessedEntry;
-use crate::engine::token::count_tokens;
-use anyhow::{bail, Context, Result};
-use dashmap::{DashMap, DashSet};
-use globset::GlobSetBuilder;
-use ignore::{WalkBuilder, WalkState};
+use anyhow::{Context, Result};
+use crossbeam_channel::{Sender, unbounded};
+use globset::GlobSet;
+use ignore::{DirEntry, WalkBuilder, WalkState};
+#[cfg(feature = "logging")]
 use log::warn;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
-use termtree::Tree;
+use sha2::{Digest, Sha256};
+
+use crate::common::{
+    code,
+    glob::build_globset,
+    hash::{HashMap, merge_usize},
+    path::{self},
+};
+use crate::engine::{
+    cache::ScanCache, config::Code2PromptConfig, filter::should_include_file,
+    model::ProcessedEntry, token::count_tokens,
+};
 
 const MAX_FILE_SIZE_BYTES: u64 = 1_048_576; // 1 MiB
 
-/// Defines the behavior of the `process_codebase` function.
+// ────────────────────────────────────────────────────────────
+// Public enum (unchanged)
+// ────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessingMode {
-    /// Reads file content, counts tokens, and prepares for prompt generation.
     FullProcess,
-    /// Only stats files to collect their extensions. Does not read content.
     ExtensionCollection,
 }
-/// Traverses the directory, processes files in parallel, and collects necessary data.
+
+// ────────────────────────────────────────────────────────────
+// Private payloads sent once per worker thread
+// ────────────────────────────────────────────────────────────
+enum Batch {
+    Entries(Vec<ProcessedEntry>),
+    Ext(HashMap<String, usize>),
+    Dir(HashMap<String, usize>),
+}
+
+// ────────────────────────────────────────────────────────────
+// One Worker per thread – aggregates locally, emits in Drop
+// ────────────────────────────────────────────────────────────
+struct Worker {
+    mode: ProcessingMode,
+    cfg: Arc<Code2PromptConfig>,
+    tx: Sender<Batch>,
+
+    // only allocated when needed
+    entries: Vec<ProcessedEntry>,
+    ext_cnt: HashMap<String, usize>,
+    dir_cnt: HashMap<String, usize>,
+}
+
+impl Worker {
+    fn new(mode: ProcessingMode, cfg: Arc<Code2PromptConfig>, tx: Sender<Batch>) -> Self {
+        Self {
+            mode,
+            cfg,
+            tx,
+            entries: Vec::new(),
+            ext_cnt: HashMap::default(),
+            dir_cnt: HashMap::default(),
+        }
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        match self.mode {
+            ProcessingMode::FullProcess if !self.entries.is_empty() => {
+                let _ = self
+                    .tx
+                    .send(Batch::Entries(std::mem::take(&mut self.entries)));
+            }
+            ProcessingMode::ExtensionCollection => {
+                if !self.ext_cnt.is_empty() {
+                    let _ = self.tx.send(Batch::Ext(std::mem::take(&mut self.ext_cnt)));
+                }
+                if !self.dir_cnt.is_empty() {
+                    let _ = self.tx.send(Batch::Dir(std::mem::take(&mut self.dir_cnt)));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// Thread-local cache handle
+// ────────────────────────────────────────────────────────────
+thread_local! {
+    static THREAD_CACHE: RefCell<Option<ScanCache>> = RefCell::new(None);
+}
+
+// ────────────────────────────────────────────────────────────
+// Public entry point
+// ────────────────────────────────────────────────────────────
 pub fn process_codebase(
-    config: &Code2PromptConfig,
+    cfg: &Code2PromptConfig,
     mode: ProcessingMode,
 ) -> Result<(
     Vec<ProcessedEntry>,
-    HashSet<String>,
-    HashMap<String, usize>, // MODIFIED: Return directory counts
+    HashMap<String, usize>,
+    HashMap<String, usize>,
 )> {
-    let mut include_builder = GlobSetBuilder::new();
-    for p in &config.include_patterns {
-        include_builder.add(globset::Glob::new(p.as_str())?);
-    }
-    let include_set = include_builder.build()?;
+    let include_glob = build_globset(&cfg.include_patterns)?;
+    let exclude_glob = build_globset(&cfg.exclude_patterns)?;
 
-    let mut exclude_builder = GlobSetBuilder::new();
-    for p in &config.exclude_patterns {
-        exclude_builder.add(globset::Glob::new(p.as_str())?);
-    }
-    let exclude_set = exclude_builder.build()?;
+    let root = cfg
+        .path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize {}", cfg.path.display()))?;
 
-    let canonical_root = config.path.canonicalize().with_context(|| {
-        format!(
-            "Failed to canonicalize root path: {}",
-            config.path.display()
-        )
-    })?;
+    // Single channel for all workers
+    let (tx, rx) = unbounded::<Batch>();
 
-    // These thread-safe collectors will hold the final, aggregated results.
-    let processed_entries_agg = Arc::new(Mutex::new(Vec::new()));
-    let extensions_agg = Arc::new(DashSet::new());
-    // NEW: Add a thread-safe map for directory file counts
-    let dirs_agg = Arc::new(DashMap::<PathBuf, usize>::new());
+    // ── start parallel walker ───────────────────────────────
+    WalkBuilder::new(&root)
+        .follow_links(cfg.follow_symlinks)
+        .hidden(!cfg.hidden)
+        .git_ignore(!cfg.no_ignore)
+        .build_parallel()
+        .run(|| {
+            let tx = tx.clone();
+            let cfg = Arc::new(cfg.clone());
+            let inc = include_glob.clone();
+            let exc = exclude_glob.clone();
+            let root = root.clone();
 
-    let mut walker_builder = WalkBuilder::new(&canonical_root);
-    walker_builder
-        .follow_links(config.follow_symlinks)
-        .hidden(!config.hidden)
-        .git_ignore(!config.no_ignore);
+            let mut w = Worker::new(mode, cfg, tx);
 
-    let walker = walker_builder.build_parallel();
-    let config_arc = Arc::new(config.clone());
-    let canonical_root_arc = Arc::new(canonical_root);
+            Box::new(move |res| {
+                THREAD_CACHE.with(|c| {
+                    // Lazily initialize the cache for this thread if needed.
+                    if w.cfg.cache && c.borrow().is_none() {
+                        *c.borrow_mut() = ScanCache::open(&root).ok();
+                    }
 
-    // Helper struct to collect per-thread results and merge them on drop.
-    // This ensures we only lock the main mutex once per thread.
-    struct ThreadResultCollector<'a> {
-        local_entries: Vec<ProcessedEntry>,
-        aggregator: Arc<Mutex<Vec<ProcessedEntry>>>,
-        // We don't need to collect extensions this way because DashSet is highly concurrent.
-        phantom: std::marker::PhantomData<&'a ()>,
-    }
+                    // Now, handle the entry using the cache reference from within the closure.
+                    // c.borrow().as_ref() correctly yields an `Option<&ScanCache>`.
+                    handle_entry(res, &root, &inc, &exc, &mut w, c.borrow().as_ref());
+                });
 
-    impl Drop for ThreadResultCollector<'_> {
-        fn drop(&mut self) {
-            if !self.local_entries.is_empty() {
-                let mut guard = self.aggregator.lock().unwrap();
-                guard.append(&mut self.local_entries);
-            }
+                WalkState::Continue
+            })
+        });
+
+    drop(tx); // close channel
+
+    // ── Aggregate batches ───────────────────────────────────
+    let mut entries = Vec::new();
+    let mut ext_cnt = HashMap::default();
+    let mut dir_cnt = HashMap::default();
+
+    while let Ok(batch) = rx.recv() {
+        match batch {
+            Batch::Entries(mut v) => entries.append(&mut v),
+            Batch::Ext(m) => merge_usize(&mut ext_cnt, m),
+            Batch::Dir(m) => merge_usize(&mut dir_cnt, m),
         }
     }
 
-    walker.run(|| {
-        let include_set = include_set.clone();
-        let exclude_set = exclude_set.clone();
-        let canonical_root = canonical_root_arc.clone();
-
-        let config = config_arc.clone();
-        let extensions = extensions_agg.clone();
-        // NEW: Clone the directory aggregator for the thread
-        let dirs = dirs_agg.clone();
-
-        // Each thread gets its own collector.
-        let mut collector = ThreadResultCollector {
-            local_entries: Vec::new(),
-            aggregator: processed_entries_agg.clone(),
-            phantom: std::marker::PhantomData,
-        };
-
-        // The inner closure can now move the cheap clones.
-        Box::new(move |entry_result| {
-            let entry = match entry_result {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Skipping entry due to error: {}", e);
-                    return WalkState::Continue;
-                }
-            };
-
-            if !should_include_file(
-                entry.path(),
-                &canonical_root, // Use the cloned canonical_root
-                &include_set,    // Use the cloned include_set
-                &exclude_set,    // Use the cloned exclude_set
-                config.include_priority,
-            ) {
-                return WalkState::Continue;
-            }
-
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                return WalkState::Continue;
-            }
-
-            let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-                if !ext.is_empty() {
-                    extensions.insert(ext.to_string());
-                }
-            }
-
-            // NEW: Collect parent directories and file-counts
-            if let Some(parent) = path.parent() {
-                if parent != &*canonical_root {
-                    if let Ok(rel_parent) = parent.strip_prefix(&*canonical_root) {
-                        if !rel_parent.as_os_str().is_empty() {
-                            dirs.entry(rel_parent.to_path_buf())
-                                .and_modify(|c| *c += 1)
-                                .or_insert(1);
-                        }
-                    }
-                }
-            }
-
-            if mode == ProcessingMode::FullProcess {
-                let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
-                // The `if let Ok(...)` already handles the `bail!` from the validation checks.
-                // No changes are needed here.
-                if let Ok(processed) = process_single_file(path, &canonical_root, &config, mtime) {
-                    collector.local_entries.push(processed);
-                }
-            }
-
-            WalkState::Continue
-        })
-    });
-
-    let final_entries = Arc::try_unwrap(processed_entries_agg)
-        .unwrap()
-        .into_inner()
-        .unwrap();
-    let final_extensions = Arc::try_unwrap(extensions_agg)
-        .unwrap()
-        .into_iter()
-        .collect();
-
-    // NEW: Collect final directory counts
-    let final_dirs: HashMap<String, usize> = Arc::try_unwrap(dirs_agg)
-        .unwrap()
-        .into_iter()
-        .map(|(path_buf, count)| (path_buf.to_string_lossy().replace('\\', "/"), count))
-        .collect();
-
-    Ok((final_entries, final_extensions, final_dirs))
+    Ok((entries, ext_cnt, dir_cnt))
 }
 
-fn process_single_file(
-    path: &Path,
+// ────────────────────────────────────────────────────────────
+//  Per-entry processing (runs inside worker closure)
+// ────────────────────────────────────────────────────────────
+fn handle_entry(
+    res: Result<DirEntry, ignore::Error>,
     root: &Path,
-    config: &Code2PromptConfig,
-    mtime: Option<SystemTime>,
-) -> Result<ProcessedEntry> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
-
-    let file_size = metadata.len();
-
-    if file_size == 0 {
-        // No need to log here, empty files are common and not usually an error.
-        // We just skip them by returning an error that the calling loop will ignore.
-        bail!("File is empty");
-    }
-
-    if file_size > MAX_FILE_SIZE_BYTES {
-        warn!(
-            "Skipping oversized file ({} > {} bytes): {}",
-            file_size,
-            MAX_FILE_SIZE_BYTES,
-            path.display()
-        );
-        bail!("File exceeds size limit");
-    }
-
-    let code = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => {
-            warn!("Skipping non-UTF-8 file: {}", path.display());
-            bail!("File is not valid UTF-8");
+    inc: &GlobSet,
+    exc: &GlobSet,
+    w: &mut Worker,
+    cache: Option<&ScanCache>,
+) {
+    let entry = match res {
+        Ok(e) => e,
+        Err(e) => {
+            #[cfg(feature = "logging")]
+            warn!("Walk error: {e}");
+            return;
         }
     };
 
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(String::from);
+    if !should_include_file(entry.path(), root, inc, exc, w.cfg.include_priority) {
+        return;
+    }
+    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+        return; // skip dirs/symlinks here
+    }
 
-    let token_count = if config.token_map_enabled {
-        count_tokens(&code, config.tokenizer).ok()
-    } else {
-        None
+    match w.mode {
+        ProcessingMode::ExtensionCollection => collect_ext_dir(entry.path(), root, w),
+        ProcessingMode::FullProcess => process_file(entry.path(), root, w, cache),
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+//  ExtensionCollection fast path
+// ────────────────────────────────────────────────────────────
+fn collect_ext_dir(path: &Path, root: &Path, w: &mut Worker) {
+    // directory counter
+    if let Some(parent) = path.parent().and_then(|p| p.strip_prefix(root).ok()) {
+        if !parent.as_os_str().is_empty() {
+            let key = path::to_fwd_slash(parent);
+            *w.dir_cnt.entry(key).or_default() += 1;
+        }
+    }
+    // extension counter
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        *w.ext_cnt.entry(ext.to_ascii_lowercase()).or_default() += 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+//  FullProcess path
+// ────────────────────────────────────────────────────────────
+fn process_file(path: &Path, root: &Path, w: &mut Worker, cache: Option<&ScanCache>) {
+    // --- Calculate relative path ONCE at the top ---
+    let rel_path = path.strip_prefix(root).unwrap_or(path);
+    let rel_path_str = path::to_fwd_slash(rel_path);
+
+    // ------- cache fast path -------
+    if let Ok(md) = fs::metadata(path) {
+        if md.len() == 0 || md.len() > MAX_FILE_SIZE_BYTES {
+            return;
+        }
+        let mtime = md.modified().ok();
+        // The `rel_path_str` is already calculated above
+        if let (Some(c), Some(mt)) = (cache, mtime) {
+            if let Ok(Some(hit)) = c.lookup(&rel_path_str, mt, md.len()) {
+                // CACHE HIT: Create entry with `code: None`. No I/O!
+                w.entries.push(make_entry(
+                    path,
+                    rel_path,
+                    None, // Pass None for code
+                    &w.cfg,
+                    Some(hit.token_count),
+                    Some(mt),
+                ));
+                return;
+            }
+        }
+    }
+
+    // ------- slow path -------
+    let code = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[cfg(feature = "logging")]
+            warn!("Skipping {} ({e})", path.display());
+            return;
+        }
     };
 
-    let code_block = wrap_code_block(
-        &code,
-        extension.as_deref().unwrap_or(""),
-        config.line_numbers,
-        config.no_codeblock,
+    // --- (passing rel_path) ---
+    let mut entry = make_entry(
+        path,
+        rel_path, // pass the pre-calculated relative path
+        Some(&code),
+        &w.cfg,
+        None,
+        None,
     );
 
-    let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-
-    Ok(ProcessedEntry {
-        path: path.to_path_buf(),
-        relative_path,
-        is_file: true,
-        code: Some(code_block),
-        extension,
-        token_count,
-        mtime,
-    })
-}
-
-pub fn rebuild_tree(
-    root_path: &Path,
-    entries: &[ProcessedEntry],
-    full_directory_tree: bool,
-) -> String {
-    let canonical_root = root_path
-        .canonicalize()
-        .unwrap_or_else(|_| root_path.to_path_buf());
-    let mut root_tree = Tree::new(label(&canonical_root));
-
-    if !full_directory_tree {
-        let mut leaves: Vec<_> = entries
-            .iter()
-            .map(|entry| Tree::new(entry.relative_path.to_string_lossy().to_string()))
-            .collect();
-        leaves.sort_by(|a, b| a.root.cmp(&b.root));
-        root_tree.leaves = leaves;
-        return root_tree.to_string();
+    if w.cfg.token_map_enabled {
+        entry.token_count = count_tokens(&code, w.cfg.tokenizer).ok();
     }
 
-    let mut sorted_entries = entries.to_vec();
-    sorted_entries.sort_by_key(|e| e.path.clone());
-
-    for entry in &sorted_entries {
-        if let Ok(relative_path) = entry.path.strip_prefix(&canonical_root) {
-            let mut current_tree = &mut root_tree;
-            for component in relative_path.components() {
-                let component_str = component.as_os_str().to_string_lossy().to_string();
-
-                current_tree = if let Some(pos) = current_tree
-                    .leaves
-                    .iter_mut()
-                    .position(|child| child.root == component_str)
-                {
-                    &mut current_tree.leaves[pos]
-                } else {
-                    let new_tree = Tree::new(component_str);
-                    current_tree.leaves.push(new_tree);
-                    current_tree.leaves.last_mut().unwrap()
-                };
+    // insert into cache
+    if let (Some(c), Some(tok)) = (cache, entry.token_count) {
+        if let Ok(md) = fs::metadata(path) {
+            if let Ok(mt) = md.modified() {
+                let digest = Sha256::digest(code.as_bytes());
+                // Use the `rel_path_str` from the top of the function
+                let _ = c.insert(&rel_path_str, mt, md.len(), digest.into(), tok, Some(&code));
             }
         }
     }
 
-    root_tree.to_string()
+    w.entries.push(entry);
 }
 
-pub fn label<P: AsRef<Path>>(p: P) -> String {
-    let path = p.as_ref();
-    if path.file_name().is_none() {
-        let current_dir = std::env::current_dir().unwrap();
-        current_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(".")
-            .to_owned()
-    } else {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_owned()
-    }
-}
-
-fn wrap_code_block(code: &str, extension: &str, line_numbers: bool, no_codeblock: bool) -> String {
-    let delimiter = "`".repeat(3);
-    let mut code_with_line_numbers = String::new();
-
-    if line_numbers {
-        for (line_number, line) in code.lines().enumerate() {
-            code_with_line_numbers.push_str(&format!("{:4} | {}\n", line_number + 1, line));
-        }
-    } else {
-        code_with_line_numbers = code.to_string();
-    }
-
-    if no_codeblock {
-        code_with_line_numbers
-    } else {
-        format!(
-            "{}{}\n{}\n{}",
-            delimiter, extension, code_with_line_numbers, delimiter
+// ────────────────────────────────────────────────────────────
+//  Utils
+// ────────────────────────────────────────────────────────────
+fn make_entry(
+    path: &Path,
+    relative_path: &Path,
+    code_str: Option<&str>,
+    cfg: &Code2PromptConfig,
+    tok_cnt: Option<usize>,
+    mtime: Option<SystemTime>,
+) -> ProcessedEntry {
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
+    let wrapped_code = code_str.map(|c| {
+        code::wrap(
+            c,
+            ext.as_deref().unwrap_or(""),
+            cfg.line_numbers,
+            cfg.no_codeblock,
         )
+    });
+    ProcessedEntry {
+        path: path.to_path_buf(),
+        relative_path: relative_path.to_path_buf(),
+        is_file: true,
+        code: wrapped_code,
+        extension: ext,
+        token_count: tok_cnt,
+        mtime,
     }
 }

@@ -1,277 +1,313 @@
-# code2prompt
+# Code2Prompt-tui
 
-[![crates.io](https://img.shields.io/crates/v/code2prompt.svg)](https://crates.io/crates/code2prompt)
-[![LICENSE](https://img.shields.io/github/license/mufeedvh/code2prompt.svg#cache1)](https://github.com/mufeedvh/code2prompt/blob/master/LICENSE)
+> **Note:** This project is a fork of the original [**code2prompt**](https://github.com/mufeedvh/code2prompt) by [Mufeed VH](https://github.com/mufeedvh) and other contributors. It builds upon its excellent foundation by adding a sophisticated, full-featured interactive Terminal User Interface (TUI) for file selection.
 
-<h1 align="center">
-  <a href="https://github.com/mufeedvh/code2prompt"><img src=".assets/code2prompt-screenshot.png" alt="code2prompt"></a>
-</h1>
+**Code2Prompt** is a blazingly fast command-line tool designed to generate comprehensive, context-aware prompts for Large Language Models (LLMs) from any codebase. It intelligently traverses your project, filters files, and uses a powerful templating engine to construct the perfect prompt for your needs.
 
-`code2prompt` is a command-line tool (CLI) that converts your codebase into a single LLM prompt with a source tree, prompt templating, and token counting.
+Its standout feature is a sophisticated interactive TUI that allows you to visually select files and directories, giving you fine-grained control over your prompt's content in real-time.
 
-## Table of Contents
+![Code2Prompt TUI Demo](.assets/tui-demo.gif)
 
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Templates](#templates)
-- [User Defined Variables](#user-defined-variables)
-- [Tokenizers](#tokenizers)
-- [Contribution](#contribution)
-- [License](#license)
-- [Support The Author](#support-the-author)
+## Key Features
 
-## Features
-
-You can run this tool on the entire directory and it would generate a well-formatted Markdown prompt detailing the source tree structure, and all the code. You can then upload this document to either GPT or Claude models with higher context windows and ask it to:
-
-- Quickly generate LLM prompts from codebases of any size.
-- Customize prompt generation with Handlebars templates. (See the [default template](src/default_template.hbs))
-- Respects `.gitignore`.
-- Filter and exclude files using glob patterns.
-- Display the token count of the generated prompt. (See [Tokenizers](#tokenizers) for more details)
-- Optionally include Git diff output (staged files) in the generated prompt.
-- Automatically copy the generated prompt to the clipboard.
-- Save the generated prompt to an output file.
-- Exclude files and folders by name or path.
-- Add line numbers to source code blocks.
-
-You can customize the prompt template to achieve any of the desired use cases. It essentially traverses a codebase and creates a prompt with all source files combined. In short, it automates copy-pasting multiple source files into your prompt and formatting them along with letting you know how many tokens your code consumes.
+- **🚀 Blazing Fast:** Leverages parallel file processing using `ignore` and `rayon` to scan even massive repositories in seconds.
+- **💻 Interactive TUI Selector:** A `ratatui`-based interface to visually navigate your project tree, see token counts, and interactively select the files and directories to include.
+- **🧠 Intelligent Filtering:** Filter files by glob patterns, file extensions, and `.gitignore` rules. Handle conflicts with an include-priority system.
+- **🔧 Powerful Templating:** Uses a `Handlebars` templating engine to give you full control over the final prompt structure. Inject file contents, a directory tree, git diffs, and more.
+- **📊 Token Awareness:** Counts tokens using official `tiktoken` tokenizers (`cl100k`, `o200k_base`, etc.) and can display a visual token map to identify the most "expensive" files.
+- **⚡ Efficient Caching:** Caches file scan results and TUI selections to make subsequent runs instantaneous.
+- **-️ Git Integration:** Directly include `git diff` or `git log` output for specific branches in your prompt.
+- **📦 Cross-Platform:** A single, self-contained binary that works on Linux, macOS, and Windows.
 
 ## Installation
 
-### Binary releases
+Download the latest pre-compiled binary for your operating system from the [GitHub Releases](https://github.com/t5k6/code2prompt-tui/releases) page.
 
-Download the latest binary for your OS from [Releases](https://github.com/mufeedvh/code2prompt/releases).
+### From Source
 
-### Source build
-Requires:
+Ensure you have the Rust toolchain installed.
 
-- [Git](https://git-scm.org/downloads), [Rust](https://rust-lang.org/tools/install) and Cargo.
+```bash
+git clone https://github.com/t5k6/code2prompt-tui.git
+cd code2prompt-tui
+cargo build --release --features full
 
-```sh
-git clone https://github.com/mufeedvh/code2prompt.git
-cd code2prompt/
-cargo build --release
-```
-
-## cargo
-installs from the [`crates.io`](https://crates.io) registry.
-
-```sh
-cargo install code2prompt
-```
-
-For unpublished builds:
-
-```sh
-cargo install --git https://github.com/mufeedvh/code2prompt
-```
-
-### AUR
-`code2prompt` is available in the [`AUR`](https://aur.archlinux.org/packages?O=0&K=code2prompt). Install it via any AUR helpers.
-
-```sh
-paru/yay -S code2prompt
-```
-
-### Nix
-If you are on nix, You can use `nix-env` or `profile` to install.
-
-```sh
-# without flakes:
-nix-env -iA nixpkgs.code2prompt
-# with flakes:
-nix profile install nixpkgs#code2prompt
+# The binary will be at target/release/code2prompt-tui
+./target/release/code2prompt-tui --version
 ```
 
 ## Usage
 
-Generate a prompt from a codebase directory:
+### Basic Usage (Interactive Mode)
 
-```sh
-code2prompt path/to/codebase
+The easiest way to use the tool is to point it at a directory. This will launch the interactive TUI selector.
+
+```bash
+code2prompt-tui .
 ```
 
-Use a custom Handlebars template file:
+The TUI provides a powerful way to visualize your codebase and select files.
 
-```sh
-code2prompt path/to/codebase -t path/to/template.hbs
+| Key(s)               | Action                                          | Pane             |
+| -------------------- | ----------------------------------------------- | ---------------- |
+| `Tab`                | Switch between panes                            | Both             |
+| `↑` / `k`            | Move cursor up                                  | Both             |
+| `↓` / `j`            | Move cursor down                                | Both             |
+| `Space`              | Toggle selection for the highlighted item       | Both             |
+| `→` / `l`            | Expand directory / Move to directory pane       | Directories / Ext |
+| `←` / `h`            | Collapse directory or move to parent/other pane | Directories      |
+| `a`                  | Select All visible file types                   | File Types       |
+| `n`                  | Deselect All visible file types                 | File Types       |
+| `i`                  | Invert selection for visible file types         | File Types       |
+| `/`                  | Enter filtering mode for file types             | File Types       |
+| `s`                  | Open Settings popup                             | Both             |
+| `Enter`              | Confirm selections and generate prompt          | Both             |
+| `q` / `Esc`          | Quit the application                            | Both             |
+
+### Non-Interactive Examples
+
+```bash
+# Include only Rust and TOML files, non-interactively
+code2prompt-tui . --extensions rs,toml --no-interactive
+
+# Exclude the 'tests' directory and generate a JSON output
+code2prompt-tui . -e "tests/**" -F json
+
+# Get a diff of the current branch against `main` and send it to an output file
+code2prompt-tui . --diff --git-diff-branch main,HEAD -O prompt.txt
+
+# Use a custom template
+code2prompt-tui . --template ./my-custom-template.hbs
 ```
 
-Filter files using glob patterns:
+### Full CLI Options
 
-```sh
-code2prompt path/to/codebase --include="*.rs,*.toml"
+<details>
+<summary>Click to expand full CLI help</summary>
+
+```text
+A command-line (CLI) tool to generate an LLM prompt from codebases of any size, fast.
+
+Usage: code2prompt-tui [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>
+
+Options:
+  -i, --include <INCLUDE>
+          Patterns to include, comma-separated
+
+  -e, --exclude <EXCLUDE>
+          Patterns to exclude, comma-separated
+
+      --extensions <EXTENSIONS>
+          File extensions to include, comma-separated (e.g. "rs,toml")
+
+      --include-priority
+          Include files in case of conflict between include and exclude patterns
+
+  -O, --output-file <OUTPUT_FILE>
+          Optional output file path
+
+  -F, --output-format <OUTPUT_FORMAT>
+          Output format: markdown, json, or xml
+          [default: markdown]
+          [possible values: markdown, json, xml]
+
+  -T, --template <TEMPLATE>
+          Optional Path to a custom Handlebars template
+
+  -V, --var <VARS>
+          Inline template variable, e.g., -V issue=123 -V author="Ada L." (repeatable)
+
+      --vars-file <VARS_FILE>
+          Path to a TOML/JSON/YAML file containing template variables
+
+      --list-templates
+          List discovered templates and exit
+
+      --no-var-cache
+          Skip reading or writing cached variable answers
+
+      --full-directory-tree
+          List the full directory tree (opposite of current exclude_from_tree)
+
+  -t, --tokenizer <TOKENIZER>
+          Tokenizer to use for token counting.
+
+          Supported: o200k_base, cl100k
+          [possible values: o200k-base, cl100k, p50k-base, p50k-edit, r50k_base]
+
+      --tokens <FORMAT>
+          Display the token count of the generated prompt.
+          Accepts a format: "raw" (machine parsable) or "format" (human readable)
+          [default: format]
+          [possible values: format, raw]
+
+      --diff
+
+
+      --git-diff-branch <BRANCHES>
+          Generate git diff between two branches
+
+      --git-log-branch <BRANCHES>
+          Retrieve git log between two branches
+
+  -l, --line-numbers
+          Add line numbers to the source code
+
+      --relative-paths
+          Use relative paths instead of absolute paths
+
+  -L, --follow-symlinks
+          Follow symlinks
+
+      --hidden
+          Include hidden directories and files
+
+      --no-codeblock
+          Disable wrapping code inside markdown code blocks
+
+      --no-clipboard
+          Disable copying to clipboard
+
+      --no-ignore
+          Skip .gitignore rules
+
+      --no-default-excludes
+          Disable the default exclude patterns (.git, target/, etc.)
+
+      --no-interactive
+          Disable all interactive prompts (for use in scripts)
+
+      --sort <SORT>
+          Sort order for files
+          [possible values: name-asc, name-desc, date-asc, date-desc]
+
+      --token-map
+          Display a visual token map of files
+
+      --token-map-lines <NUMBER>
+          Maximum number of lines to display in token map (default: 20)
+
+      --experimental-tree
+          [DEBUG] Print the experimental directory tree and exit
+
+      --token-map-min-percent <PERCENT>
+          Minimum percentage of tokens to display in token map (default: 0.1%)
+
+      --cache
+
+
+  -h, --help
+          Print help (see more with '--help')
+
+  -V, --version
+          Print version
+
+EXAMPLES:
+    code2prompt-tui .
+        Scans the current directory interactively.
+    code2prompt-tui . --extensions rs,toml
+        Includes only files with .rs and .toml extensions.
+    code2prompt-tui /path/to/project -e '**/tests/*_snapshots/*'
+        Scans a different path and excludes snapshot files from tests.
+    code2prompt-tui . --extensions rs,toml --no-interactive
+        Include only Rust and TOML files non-interactively
+    code2prompt-tui . -e "tests/**" -F json
+        Exclude the 'tests' directory and generate a JSON output
+    code2prompt-tui . --diff -O prompt.txt
+        Get a diff of the current branch and send it to an output file
+```
+</details>
+
+---
+
+## Templating
+
+`code2prompt-tui` uses the [Handlebars](https://handlebarsjs.com/) templating language to construct the final prompt. You can provide your own template with `--template <path>`.
+
+### Available Template Variables
+
+| Variable             | Description                                                   |
+| -------------------- | ------------------------------------------------------------- |
+| `{{absolute_code_path}}` | The absolute path to the root of the scanned project.         |
+| `{{source_tree}}`    | A `termtree`-style string representing the project structure.   |
+| `{{#each files}}...{{/each}}` | Loop over each selected file.                                 |
+| `{{this.path}}`      | The relative or absolute path to the file.                    |
+| `{{this.code}}`      | The full content of the file, wrapped in a markdown block.    |
+| `{{this.extension}}` | The file's extension (e.g., "rs", "py").                      |
+| `{{git_diff}}`       | The output of `git diff` for staged and unstaged changes.     |
+| `{{git_diff_branch}}` | The output of `git diff` between two specified branches.     |
+| `{{git_log_branch}}`  | The output of `git log` between two specified branches.      |
+| `{{your_custom_var}}` | Any variable passed via `-V` flag or a vars file.             |
+
+### Default Template
+
+This is the built-in template used if no other is provided:
+
+```handlebars
+The user wants to understand the following project.
+Project path: {{absolute_code_path}}
+
+This is the directory structure:
+{{source_tree}}
+
+These are the file contents:
+{{#each files}}
+File: {{this.path}}
+Content:
+{{this.code}}
+{{/each}}
 ```
 
-Exclude files using glob patterns:
+### Custom Variables
 
-```sh
-code2prompt path/to/codebase --exclude="*.txt,*.md"
+You can inject your own variables into the template. The resolution order is:
+
+1.  **CLI arguments:** `-V key=value` (highest priority)
+2.  **Environment variables:** `C2P_KEY=value`
+3.  **Vars file:** `--vars-file path/to/vars.toml`
+4.  **Config file:** `[template.defaults]` in `config.toml`
+5.  **Cached variables:** From previous interactive sessions (lowest priority)
+
+## Configuration
+
+You can create a configuration file at `<CONFIG_DIR>/code2prompt-tui/config.toml` to set persistent options. Note that the configuration directory is named `code2prompt` for compatibility with the original project.
+
+Example `config.toml`:
+
+```toml
+# Default tokenizer to use if not specified on the CLI
+tokenizer = "O200kBase"
+
+# Always add line numbers to code blocks
+line_numbers = true
+
+# Never wrap code in markdown ``` blocks
+# no_codeblock = true
+
+# Add custom global exclude patterns
+exclude = [
+    "**/__pycache__/*",
+    "**/*.snap",
+]
+
+# Set default values for template variables
+[template.defaults]
+project_goal = "Analyze the codebase for refactoring opportunities."
+author = "Your Name"
+
+# Override default TUI settings
+[gui.settings]
+hidden = true
+follow_symlinks = false
 ```
 
-Exclude files/folders from the source tree based on exclude patterns:
+## Contributing
 
-```sh
-code2prompt path/to/codebase --exclude="*.npy,*.wav" --exclude-from-tree
-```
-
-Display the token count of the generated prompt:
-
-```sh
-code2prompt path/to/codebase --tokens
-```
-
-Specify a tokenizer for token count:
-
-```sh
-code2prompt path/to/codebase --tokens --encoding=p50k
-```
-
-Supported tokenizers: `o200k_base`, `cl100k`, `p50k`, `p50k_edit`, `r50k_bas`.
-> [!NOTE]
-> See [Tokenizers](#tokenizers) for more details.
-
-Save the generated prompt to an output file:
-
-```sh
-code2prompt path/to/codebase --output=output.txt
-```
-
-Print output as JSON:
-
-```sh
-code2prompt path/to/codebase --json
-```
-
-The JSON output will have the following structure:
-
-```json
-{
-  "prompt": "<Generated Prompt>",
-  "directory_name": "codebase",
-  "token_count": 1234,
-  "model_info": "Model info: GPT-4o models, o1 models",
-  "files": []
-}
-```
-
-Generate a Git commit message (for staged files):
-
-```sh
-code2prompt path/to/codebase --diff -t templates/write-git-commit.hbs
-```
-
-Generate a Pull Request with branch comparing (for staged files):
-
-```sh
-code2prompt path/to/codebase --git-diff-branch 'main, development' --git-log-branch 'main, development' -t templates/write-github-pull-request.hbs
-```
-
-Add line numbers to source code blocks:
-
-```sh
-code2prompt path/to/codebase --line-number
-```
-
-Disable wrapping code inside markdown code blocks:
-
-```sh
-code2prompt path/to/codebase --no-codeblock
-```
-
-- Rewrite the code to another language.
-- Find bugs/security vulnerabilities.
-- Document the code.
-- Implement new features.
-
-> I initially wrote this for personal use to utilize Claude 3.0's 200K context window and it has proven to be pretty useful so I decided to open-source it!
-
-## Templates
-
-`code2prompt` comes with a set of built-in templates for common use cases. You can find them in the [`templates`](templates) directory.
-
-### [`document-the-code.hbs`](templates/document-the-code.hbs)
-
-Use this template to generate prompts for documenting the code. It will add documentation comments to all public functions, methods, classes and modules in the codebase.
-
-### [`find-security-vulnerabilities.hbs`](templates/find-security-vulnerabilities.hbs)
-
-Use this template to generate prompts for finding potential security vulnerabilities in the codebase. It will look for common security issues and provide recommendations on how to fix or mitigate them.
-
-### [`clean-up-code.hbs`](templates/clean-up-code.hbs)
-
-Use this template to generate prompts for cleaning up and improving the code quality. It will look for opportunities to improve readability, adherence to best practices, efficiency, error handling, and more.
-
-### [`fix-bugs.hbs`](templates/fix-bugs.hbs)
-
-Use this template to generate prompts for fixing bugs in the codebase. It will help diagnose issues, provide fix suggestions, and update the code with proposed fixes.
-
-### [`write-github-pull-request.hbs`](templates/write-github-pull-request.hbs)
-
-Use this template to create GitHub pull request description in markdown by comparing the git diff and git log of two branches.
-
-### [`write-github-readme.hbs`](templates/write-github-readme.hbs)
-
-Use this template to generate a high-quality README file for the project, suitable for hosting on GitHub. It will analyze the codebase to understand its purpose and functionality, and generate the README content in Markdown format.
-
-### [`write-git-commit.hbs`](templates/write-git-commit.hbs)
-
-Use this template to generate git commits from the staged files in your git directory. It will analyze the codebase to understand its purpose and functionality, and generate the git commit message content in Markdown format.
-
-### [`improve-performance.hbs`](templates/improve-performance.hbs)
-
-Use this template to generate prompts for improving the performance of the codebase. It will look for optimization opportunities, provide specific suggestions, and update the code with the changes.
-
-You can use these templates by passing the `-t` flag followed by the path to the template file. For example:
-
-```sh
-code2prompt path/to/codebase -t templates/document-the-code.hbs
-```
-
-## User Defined Variables
-
-`code2prompt` supports the use of user defined variables in the Handlebars templates. Any variables in the template that are not part of the default context (`absolute_code_path`, `source_tree`, `files`) will be treated as user defined variables.
-
-During prompt generation, `code2prompt` will prompt the user to enter values for these user defined variables. This allows for further customization of the generated prompts based on user input.
-
-For example, if your template includes `{{challenge_name}}` and `{{challenge_description}}`, you will be prompted to enter values for these variables when running `code2prompt`.
-
-This feature enables creating reusable templates that can be adapted to different scenarios based on user provided information.
-
-## Tokenizers
-
-Tokenization is implemented using [`tiktoken-rs`](https://github.com/zurawiki/tiktoken-rs). `tiktoken` supports these encodings used by OpenAI models:
-
-| Encoding name           | OpenAI models                                                             |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `o200k_base`            | GPT-4o models, o1 models                                                  |
-| `cl100k_base`           | ChatGPT models, `text-embedding-ada-002`                                  |
-| `p50k_base`             | Code models, `text-davinci-002`, `text-davinci-003`                       |
-| `p50k_edit`             | Use for edit models like `text-davinci-edit-001`, `code-davinci-edit-001` |
-| `r50k_base` (or `gpt2`) | GPT-3 models like `davinci`                                               |
-
-For more context on the different tokenizers, see the [OpenAI Cookbook](https://github.com/openai/openai-cookbook/blob/66b988407d8d13cad5060a881dc8c892141f2d5c/examples/How_to_count_tokens_with_tiktoken.ipynb)
-
-## How is it useful?
-
-`code2prompt` makes it easy to generate prompts for LLMs from your codebase. It traverses the directory, builds a tree structure, and collects information about each file. You can customize the prompt generation using Handlebars templates. The generated prompt is automatically copied to your clipboard and can also be saved to an output file. `code2prompt` helps streamline the process of creating LLM prompts for code analysis, generation, and other tasks.
-
-## Contribution
-
-Ways to contribute:
-
-- Suggest a feature
-- Report a bug
-- Fix something and open a pull request
-- Help me document the code
-- Spread the word
+Contributions are welcome! Please feel free to open an issue or submit a pull request. Check out `CONTRIBUTING.md` for more details on how to get started.
 
 ## License
 
-Licensed under the MIT License, see <a href="https://github.com/mufeedvh/code2prompt/blob/master/LICENSE">LICENSE</a> for more information.
-
-## Liked the project?
-
-If you liked the project and found it useful, please give it a :star: and consider supporting the authors!
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.

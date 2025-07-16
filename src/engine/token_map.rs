@@ -1,7 +1,6 @@
-use crate::engine::model::{EntryMetadata, TokenMapEntry, TreeNode};
+use crate::engine::model::{EntryMetadata, ProcessedEntry, TokenMapEntry, TreeNode};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use std::path::Path;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct NodePriority {
@@ -26,7 +25,7 @@ impl PartialOrd for NodePriority {
 }
 
 pub fn generate_token_map_with_limit(
-    files: &[serde_json::Value],
+    entries: &[ProcessedEntry],
     max_lines: Option<usize>,
     min_percent: Option<f64>,
 ) -> Vec<TokenMapEntry> {
@@ -34,21 +33,26 @@ pub fn generate_token_map_with_limit(
     let min_percent = min_percent.unwrap_or(0.1);
     let mut root = TreeNode::with_path(String::new());
 
-    for file in files {
-        if let (Some(path_str), Some(tokens), Some(metadata_json)) = (
-            file.get("path").and_then(|p| p.as_str()),
-            file.get("token_count").and_then(|t| t.as_u64()),
-            file.get("metadata"),
-        ) {
-            let tokens = tokens as usize;
-            if let Ok(metadata) = serde_json::from_value(metadata_json.clone()) {
-                let path = Path::new(path_str);
-                let components: Vec<_> = path
-                    .components()
-                    .filter_map(|c| c.as_os_str().to_str())
-                    .collect();
-                insert_path(&mut root, &components, tokens, String::new(), metadata);
+    for entry in entries.iter().filter(|e| e.is_file) {
+        if let Some(tokens) = entry.token_count {
+            // Only process entries that have tokens to avoid cluttering the map.
+            if tokens == 0 {
+                continue;
             }
+
+            let path_str = entry.relative_path.to_string_lossy();
+            // The insert_path function expects path components.
+            let components: Vec<&str> = path_str.split('/').collect();
+
+            // This metadata is for the file node itself.
+            let metadata = EntryMetadata {
+                is_dir: false,
+                // ProcessedEntry doesn't track symlinks, so `false` is a safe default.
+                is_symlink: false,
+            };
+
+            // Call the helper to recursively build the tree and aggregate token counts.
+            insert_path(&mut root, &components, tokens, String::new(), metadata);
         }
     }
 
@@ -114,7 +118,7 @@ fn insert_path(
     let current_full_path = if parent_path.is_empty() {
         current_component_name.clone()
     } else {
-        format!("{}/{}", parent_path, current_component_name)
+        format!("{parent_path}/{current_component_name}")
     };
     let child_node = node
         .children

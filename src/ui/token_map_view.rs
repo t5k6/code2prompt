@@ -1,24 +1,17 @@
-use crate::engine::model::TokenMapEntry;
-use atty;
-#[cfg(feature = "colors")]
-use lscolors::{Indicator, LsColors, Style as LsStyle};
+#![cfg(feature = "token_map")]
+
 use std::cmp::Ordering;
 use std::fmt::Write;
 use std::path::Path;
+
+use atty;
+#[cfg(feature = "colors")]
+use lscolors::{Indicator, LsColors, Style as LsStyle};
 use terminal_size;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub fn format_tokens_integer_arithmetic(tokens: usize) -> String {
-    if tokens >= 1_000_000 {
-        let millions = (tokens + 500_000) / 1_000_000;
-        format!("{}M", millions)
-    } else if tokens >= 1_000 {
-        let thousands = (tokens + 500) / 1_000;
-        format!("{}K", thousands)
-    } else {
-        format!("{}", tokens)
-    }
-}
+use crate::common::format::{self, TokenFormatStyle};
+use crate::engine::model::TokenMapEntry;
 
 #[cfg(feature = "colors")]
 fn should_enable_colors() -> bool {
@@ -57,8 +50,8 @@ fn style_to_ansi(text: &str, style: &LsStyle) -> String {
 
     if let Some(fg) = &style.foreground {
         match fg {
-            lscolors::Color::Fixed(code) => codes.push(format!("38;5;{}", code)),
-            lscolors::Color::RGB(r, g, b) => codes.push(format!("38;2;{};{};{}", r, g, b)),
+            lscolors::Color::Fixed(code) => codes.push(format!("38;5;{code}")),
+            lscolors::Color::RGB(r, g, b) => codes.push(format!("38;2;{r};{g};{b}")),
             lscolors::Color::Black => codes.push("30".to_string()),
             lscolors::Color::Red => codes.push("31".to_string()),
             lscolors::Color::Green => codes.push("32".to_string()),
@@ -82,7 +75,8 @@ fn style_to_ansi(text: &str, style: &LsStyle) -> String {
         return text.to_string();
     }
 
-    write!(s, "\x1b[{}m{}\x1b[0m", codes.join(";"), text).unwrap();
+    write!(s, "\x1b[{}m{}\x1b[0m", codes.join(";"), text)
+        .expect("Writing to a String buffer should not fail");
     s
 }
 
@@ -134,9 +128,9 @@ pub fn display_token_map(entries: &[TokenMapEntry], total_tokens: usize) {
         .unwrap_or(80);
     let max_token_width = entries
         .iter()
-        .map(|e| format_tokens_integer_arithmetic(e.tokens).len())
+        .map(|e| format::format_tokens(e.tokens, TokenFormatStyle::Map).len())
         .chain(std::iter::once(
-            format_tokens_integer_arithmetic(total_tokens).len(),
+            format::format_tokens(total_tokens, TokenFormatStyle::Map).len(),
         ))
         .max()
         .unwrap_or(3)
@@ -193,8 +187,7 @@ pub fn display_token_map(entries: &[TokenMapEntry], total_tokens: usize) {
             .get(i + 1)
             .map(|next_entry| next_entry.depth > entry.depth)
             .unwrap_or(false);
-        if entry.depth > 0 || entry.name == "(other files)" || i == 0
-        {
+        if entry.depth > 0 || entry.name == "(other files)" || i == 0 {
             if has_children_to_display {
                 prefix.push('┬');
             } else {
@@ -202,7 +195,7 @@ pub fn display_token_map(entries: &[TokenMapEntry], total_tokens: usize) {
             }
         }
         prefix.push(' ');
-        let tokens_str = format_tokens_integer_arithmetic(entry.tokens);
+        let tokens_str = format::format_tokens(entry.tokens, TokenFormatStyle::Map);
         let parent_bar_idx = if entry.depth == 0 { 0 } else { entry.depth - 1 };
         let parent_bar_to_use = parent_bars
             .get(parent_bar_idx)
@@ -238,7 +231,7 @@ pub fn display_token_map(entries: &[TokenMapEntry], total_tokens: usize) {
                 take_chars += 1;
             }
             let truncated: String = entry.name.chars().take(take_chars).collect();
-            (format!("{}…", truncated), 0)
+            (format!("{truncated}…"), 0)
         } else {
             (entry.name.clone(), available_for_name - name_display_width)
         };
@@ -276,23 +269,5 @@ pub fn display_token_map(entries: &[TokenMapEntry], total_tokens: usize) {
             percentage_str,
             max_token_width = max_token_width
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_tokens_integer_arithmetic() {
-        assert_eq!(format_tokens_integer_arithmetic(999), "999");
-        assert_eq!(format_tokens_integer_arithmetic(1_000), "1K");
-        assert_eq!(format_tokens_integer_arithmetic(1_499), "1K");
-        assert_eq!(format_tokens_integer_arithmetic(1_500), "2K");
-        assert_eq!(format_tokens_integer_arithmetic(1_501), "2K");
-        assert_eq!(format_tokens_integer_arithmetic(1_999), "2K");
-        assert_eq!(format_tokens_integer_arithmetic(1_000_000), "1M");
-        assert_eq!(format_tokens_integer_arithmetic(2_499_999), "2M");
-        assert_eq!(format_tokens_integer_arithmetic(2_500_000), "3M");
     }
 }

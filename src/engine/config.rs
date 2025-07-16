@@ -1,11 +1,11 @@
-// src/config.rs
+use std::path::PathBuf;
 
-use crate::engine::token::TokenizerChoice;
-use crate::ui::cli::FileSortMethod;
 use clap::ValueEnum;
 use derive_builder::Builder;
 use glob::Pattern;
-use std::path::PathBuf;
+
+use crate::engine::token::TokenizerChoice;
+use crate::ui::cli::FileSortMethod;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Default)]
 pub enum OutputFormat {
@@ -46,16 +46,12 @@ impl std::fmt::Display for TokenFormat {
 pub struct Code2PromptConfig {
     #[builder(default = "PathBuf::from(\".\")")]
     pub path: PathBuf,
-
     #[builder(default)]
     pub include_patterns: Vec<Pattern>,
-
     #[builder(default)]
     pub exclude_patterns: Vec<Pattern>,
-
     #[builder(default)]
     pub include_priority: bool,
-
     #[builder(default)]
     pub line_numbers: bool,
     #[builder(default)]
@@ -76,6 +72,8 @@ pub struct Code2PromptConfig {
     pub follow_symlinks: bool,
     #[builder(default)]
     pub sort: Option<FileSortMethod>,
+    #[builder(default)]
+    pub cache: bool,
 }
 
 impl Code2PromptConfigBuilder {

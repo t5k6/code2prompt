@@ -1,10 +1,11 @@
-use code2prompt::engine::filter::should_include_file;
+use code2prompt_tui::engine::filter::should_include_file;
 use colored::*;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use once_cell::sync::Lazy;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 fn create_temp_file(dir: &Path, name: &str, content: &str) {
     let file_path = dir.join(name);
@@ -58,10 +59,13 @@ fn create_test_hierarchy(base_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glob::Pattern;
 
-    fn compile_patterns(patterns: &[&str]) -> Vec<Pattern> {
-        patterns.iter().map(|s| Pattern::new(s).unwrap()).collect()
+    fn compile_patterns(patterns: &[&str]) -> GlobSet {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            builder.add(Glob::new(pattern).unwrap());
+        }
+        builder.build().unwrap()
     }
 
     #[test]

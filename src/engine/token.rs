@@ -2,19 +2,30 @@
 
 use anyhow::Result;
 use clap::ValueEnum;
-use dashmap::DashMap;
-use once_cell::sync::OnceCell;
-use std::sync::Arc;
-use tiktoken_rs::{get_bpe_from_tokenizer, tokenizer::Tokenizer, CoreBPE};
+use serde::{Deserialize, Serialize};
 
+// --- Conditionally compiled imports ---
+#[cfg(feature = "token_map")]
+use {
+    dashmap::DashMap,
+    once_cell::sync::OnceCell,
+    std::sync::Arc,
+    tiktoken_rs::{CoreBPE, get_bpe_from_tokenizer, tokenizer::Tokenizer},
+};
+
+// --- Conditionally compiled statics and types ---
+#[cfg(feature = "token_map")]
 type SharedBPE = Arc<CoreBPE>;
+#[cfg(feature = "token_map")]
 static TOKENIZER_CACHE: OnceCell<DashMap<String, SharedBPE>> = OnceCell::new();
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "PascalCase")]
 pub enum TokenizerChoice {
     /// For GPT-4o, GPT-4 Turbo, and o1 models.
     O200kBase,
     /// For ChatGPT models, text-embedding-ada-002. (Default)
+    #[default] // This attribute makes Cl100k the default for #[derive(Default)]
     Cl100k,
     /// For Code models, text-davinci-002, text-davinci-003.
     P50kBase,
@@ -23,6 +34,23 @@ pub enum TokenizerChoice {
     /// For GPT-3 models like davinci.
     #[value(name = "r50k_base", alias = "gpt2")]
     R50kBase,
+}
+
+impl TokenizerChoice {
+    pub fn next(&self) -> Self {
+        let variants = Self::value_variants();
+        let current_pos = variants.iter().position(|v| v == self).unwrap_or(0);
+        let next_pos = (current_pos + 1) % variants.len();
+        variants[next_pos]
+    }
+
+    pub fn previous(&self) -> Self {
+        let variants = Self::value_variants();
+        let current_pos = variants.iter().position(|v| v == self).unwrap_or(0);
+        // Calculate the previous position, wrapping around correctly.
+        let prev_pos = (current_pos + variants.len() - 1) % variants.len();
+        variants[prev_pos]
+    }
 }
 
 impl std::fmt::Display for TokenizerChoice {
@@ -37,6 +65,7 @@ impl std::fmt::Display for TokenizerChoice {
     }
 }
 
+#[cfg(feature = "token_map")]
 fn get_cache() -> &'static DashMap<String, SharedBPE> {
     TOKENIZER_CACHE.get_or_init(DashMap::new)
 }
@@ -50,6 +79,7 @@ fn get_cache() -> &'static DashMap<String, SharedBPE> {
 /// # Returns
 ///
 /// * `CoreBPE` - The tokenizer corresponding to the specified encoding.
+#[cfg(feature = "token_map")]
 pub fn get_tokenizer(tokenizer_name: TokenizerChoice) -> Result<SharedBPE> {
     // <-- Use the enum
     let cache = get_cache();
@@ -85,7 +115,6 @@ pub fn get_tokenizer(tokenizer_name: TokenizerChoice) -> Result<SharedBPE> {
 ///
 /// * `&'static str` - A string describing the models associated with the specified encoding.
 pub fn get_model_info(tokenizer_name: TokenizerChoice) -> &'static str {
-    // <-- Use the enum
     match tokenizer_name {
         TokenizerChoice::O200kBase => "GPT-4o models, o1 models",
         TokenizerChoice::Cl100k => "ChatGPT models, text-embedding-ada-002",
@@ -107,8 +136,16 @@ pub fn get_model_info(tokenizer_name: TokenizerChoice) -> &'static str {
 /// # Returns
 ///
 /// * `usize` - The number of tokens in the text.
+// --- Real count_tokens ---
+#[cfg(feature = "token_map")]
 pub fn count_tokens(text: &str, tokenizer_name: TokenizerChoice) -> Result<usize> {
-    // <-- Use the enum
     let bpe = get_tokenizer(tokenizer_name)?;
     Ok(bpe.encode_with_special_tokens(text).len())
+}
+
+// --- Stub count_tokens for when feature is disabled ---
+#[cfg(not(feature = "token_map"))]
+pub fn count_tokens(_text: &str, _tokenizer_name: TokenizerChoice) -> Result<usize> {
+    // Return 0 if token counting is not compiled in.
+    Ok(0)
 }

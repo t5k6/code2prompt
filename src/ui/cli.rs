@@ -1,18 +1,31 @@
-// src/args.rs
-
-use crate::engine::config::{OutputFormat, TokenFormat};
-use crate::engine::token::TokenizerChoice;
-use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
+use anyhow::Result;
+use clap::{Parser, ValueEnum};
+
+use crate::engine::config::{OutputFormat, TokenFormat};
+use crate::engine::model::ProcessedEntry;
+use crate::engine::token::TokenizerChoice;
+
 // Define an enum for the sort argument for type safety
-#[derive(ValueEnum, Debug, Clone, Default)] // <-- Add Default
+#[derive(ValueEnum, Debug, Clone, Default, PartialEq, Eq)]
 pub enum FileSortMethod {
-    #[default] // <-- Add #[default] attribute for clarity
+    #[default]
     NameAsc,
     NameDesc,
     DateAsc,
     DateDesc,
+}
+
+impl FileSortMethod {
+    pub fn apply(&self, v: &mut [ProcessedEntry]) {
+        match self {
+            Self::NameAsc => v.sort_by(|a, b| a.path.cmp(&b.path)),
+            Self::NameDesc => v.sort_by(|a, b| b.path.cmp(&a.path)),
+            Self::DateAsc => v.sort_by_key(|e| e.mtime),
+            Self::DateDesc => v.sort_by_key(|e| std::cmp::Reverse(e.mtime)),
+        }
+    }
 }
 
 // ~~~ CLI Arguments ~~~
@@ -22,7 +35,23 @@ pub enum FileSortMethod {
     version = env!("CARGO_PKG_VERSION"),
     author = env!("CARGO_PKG_AUTHORS")
 )]
-#[command(arg_required_else_help = true)]
+#[command(
+    arg_required_else_help = true,
+    after_help = r#"EXAMPLES:
+    code2prompt .
+        Scans the current directory interactively.
+    code2prompt . --extensions rs,toml
+        Includes only files with .rs and .toml extensions.
+    code2prompt /path/to/project -e '**/tests/*_snapshots/*'
+        Scans a different path and excludes snapshot files from tests."
+    code2prompt . --extensions rs,toml --no-interactive
+        Include only Rust and TOML files non-interactively
+    code2prompt . -e "tests/**" -F json
+        Exclude the 'tests' directory and generate a JSON output
+    code2prompt . --diff -O prompt.txt
+        Get a diff of the current branch and send it to an output file
+  "#
+)]
 pub struct Cli {
     pub path: PathBuf,
 
@@ -54,6 +83,22 @@ pub struct Cli {
     #[clap(short = 'T', long)]
     pub template: Option<PathBuf>,
 
+    /// Inline template variable, e.g., -V issue=123 -V author="Ada L." (repeatable)
+    #[clap(short = 'V', long = "var", value_parser = parse_key_val, number_of_values = 1)]
+    pub vars: Vec<(String, String)>,
+
+    /// Path to a TOML/JSON/YAML file containing template variables.
+    #[clap(long = "vars-file")]
+    pub vars_file: Option<PathBuf>,
+
+    /// List discovered templates and exit.
+    #[clap(long = "list-templates")]
+    pub list_templates: bool,
+
+    /// Skip reading or writing cached variable answers.
+    #[clap(long = "no-var-cache")]
+    pub no_var_cache: bool,
+
     /// List the full directory tree (opposite of current exclude_from_tree)
     #[clap(long)]
     pub full_directory_tree: bool,
@@ -61,8 +106,8 @@ pub struct Cli {
     /// Tokenizer to use for token counting.
     ///
     /// Supported: o200k_base, cl100k
-    #[clap(short = 't', long = "tokenizer", default_value_t = TokenizerChoice::Cl100k)]
-    pub tokenizer: TokenizerChoice,
+    #[clap(short = 't', long = "tokenizer")]
+    pub tokenizer: Option<TokenizerChoice>,
 
     /// Display the token count of the generated prompt.
     /// Accepts a format: "raw" (machine parsable) or "format" (human readable).
@@ -108,6 +153,10 @@ pub struct Cli {
     #[clap(long)]
     pub no_ignore: bool,
 
+    /// Disable the default exclude patterns (.git, target/, etc.)
+    #[clap(long)]
+    pub no_default_excludes: bool,
+
     /// Disable all interactive prompts (for use in scripts)
     #[clap(long)]
     pub no_interactive: bool,
@@ -124,10 +173,21 @@ pub struct Cli {
     #[clap(long, value_name = "NUMBER")]
     pub token_map_lines: Option<usize>,
 
+    /// [DEBUG] Print the experimental directory tree and exit
+    #[clap(long, hide = true)]
+    pub experimental_tree: bool,
+
     /// Minimum percentage of tokens to display in token map (default: 0.1%)
     #[clap(long, value_name = "PERCENT")]
     pub token_map_min_percent: Option<f64>,
 
-    #[arg(long, hide = true)]
-    pub clipboard_daemon: bool,
+    #[clap(long)]
+    pub cache: bool,
+}
+
+/// A clap value-parser for `-V key=value` arguments.
+fn parse_key_val(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .ok_or_else(|| "Variable must be in KEY=value format".to_string())
 }

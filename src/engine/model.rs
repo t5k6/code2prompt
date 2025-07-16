@@ -1,13 +1,33 @@
-// src/model.rs
-
 //! Contains the core data structures for the application.
 
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::time::SystemTime;
+use std::{collections::BTreeMap, path::PathBuf, time::SystemTime};
 
-// --- Moved from token_map.rs ---
+use serde::{Deserialize, Serialize};
+
+use crate::ui::tree_arena::PathInfo;
+
+/// The complete, serializable context passed to the template engine.
+#[derive(Debug, Serialize)]
+pub struct TemplateContext {
+    pub absolute_code_path: String,
+    pub files: Vec<FileContext>,
+    pub source_tree: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_diff: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_diff_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_log_branch: Option<String>,
+}
+
+/// Represents a single file within the template context.
+#[derive(Debug, Serialize)]
+pub struct FileContext {
+    pub path: String,
+    pub extension: String,
+    pub code: String,
+    pub token_count: Option<usize>,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct EntryMetadata {
@@ -55,4 +75,24 @@ pub struct ProcessedEntry {
     pub extension: Option<String>,
     pub token_count: Option<usize>,
     pub mtime: Option<SystemTime>,
+}
+
+#[cfg(feature = "tui")]
+impl PathInfo for ProcessedEntry {
+    fn path(&self) -> &str {
+        // Use the relative path for the tree
+        self.relative_path.to_str().unwrap_or_default()
+    }
+
+    fn count(&self) -> usize {
+        // The tree arena uses this to sum up file counts. Each entry is one file.
+        1
+    }
+
+    fn extension(&self) -> Option<&String> {
+        self.extension.as_ref()
+    }
+    fn token_count(&self) -> Option<usize> {
+        self.token_count
+    }
 }
